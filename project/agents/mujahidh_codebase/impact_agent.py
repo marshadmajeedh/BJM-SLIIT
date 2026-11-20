@@ -1,76 +1,146 @@
 
 import ast
 import json
+from collections import deque
 from pathlib import Path
+
+
+EXCLUDED = {".git", ".venv", "venv", "__pycache__"}
+
+
+def build_dependency_graph(repository_path):
+    root = Path(repository_path).resolve()
+
+    if not root.is_dir():
+        raise ValueError("Repository folder not found")
+
+    files = {
+        p.relative_to(root).as_posix(): p
+        for p in root.rglob("*.py")
+        if not any(
+            part in EXCLUDED
+            for part in p.relative_to(root).parts
+        )
+    }
+
+    # Module name -> source file
+    modules = {
+        name[:-3].replace("/", "."): name
+        for name in files
+    }
+
+    # Maps imported file -> files depending on it
+    reverse_graph = {name: [] for name in files}
+
+    for filename, path in files.items():
+        try:
+            tree = ast.parse(
+                path.read_text(encoding="utf-8")
+            )
+        except (SyntaxError, UnicodeError, OSError):
+            continue
+
+        dependencies = set()
+
+        for node in ast.walk(tree):
+            imported_modules = []
+
+            if isinstance(node, ast.Import):
+                imported_modules = [
+                    alias.name for alias in node.names
+                ]
+
+            elif isinstance(node, ast.ImportFrom):
+                # MVP supports absolute imports only.
+                if node.level == 0 and node.module:
+                    imported_modules = [node.module]
+
+            for module in imported_modules:
+                if module in modules:
+                    target = modules[module]
+
+                    if target != filename:
+                        dependencies.add(
+                            (target, node.lineno)
+                        )
+
+        for target, line in sorted(dependencies):
+            reverse_graph[target].append({
+                "file": filename,
+                "import_line": line
+            })
+
+    return reverse_graph
 
 
 def analyze_impact(repository_path, changed_file):
     root = Path(repository_path).resolve()
-    changed = Path(changed_file)
+    graph = build_dependency_graph(root)
 
-    if not root.is_dir():
-        raise ValueError("Repository not found")
+    changed_path = Path(changed_file)
 
-    if changed.is_absolute() or ".." in changed.parts:
-        raise ValueError("Use a relative file path inside the repository")
+    if changed_path.is_absolute() or ".." in changed_path.parts:
+        raise ValueError("Use a relative repository file path")
 
-    target = (root / changed).resolve()
+    changed = changed_path.as_posix()
 
-    if not target.is_file() or not target.is_relative_to(root):
-        raise ValueError("Changed file not found")
+    if changed not in graph:
+        raise ValueError("Changed Python file not found")
 
-    changed_module = changed.with_suffix("").as_posix().replace("/", ".")
+    queue = deque([(changed, 0)])
+    visited = {changed}
+    impacted = []
 
-    report = {
-        "changed_file": changed.as_posix(),
-        "potentially_impacted_files": [],
-        "analysis_method": "static_import_analysis"
-    }
+    while queue:
+        current, depth = queue.popleft()
 
-    for file in sorted(root.rglob("*.py")):
-        if file == target:
-            continue
+        for dependent in graph[current]:
+            filename = dependent["file"]
 
-        if any(part in {".git", ".venv", "venv", "__pycache__"}
-               for part in file.relative_to(root).parts):
-            continue
+            if filename in visited:
+                continue
 
-        try:
-            tree = ast.parse(file.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeError, OSError):
-            continue
+            visited.add(filename)
 
-        evidence = []
+            level = depth + 1
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.module == changed_module:
-                    names = [alias.name for alias in node.names]
-                    evidence.append({
-                        "line": node.lineno,
-                        "imported_symbols": names
-                    })
-
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == changed_module:
-                        evidence.append({
-                            "line": node.lineno,
-                            "imported_module": alias.name
-                        })
-
-        if evidence:
-            report["potentially_impacted_files"].append({
-                "file": file.relative_to(root).as_posix(),
-                "reason": "Directly imports the changed module",
-                "evidence": evidence
+            impacted.append({
+                "file": filename,
+                "impact_level": (
+                    "direct" if level == 1 else "indirect"
+                ),
+                "dependency_depth": level,
+                "via_file": current,
+                "import_line": dependent["import_line"],
+                "reason": (
+                    "Depends on a changed or potentially "
+                    "impacted module"
+                )
             })
 
-    report["total_impacted"] = len(
-        report["potentially_impacted_files"]
+            queue.append((filename, level))
+
+    impacted.sort(
+        key=lambda x: (
+            x["dependency_depth"],
+            x["file"]
+        )
     )
 
-    return report
+    return {
+        "changed_file": changed,
+        "analysis_method": "static_reverse_dependency_bfs",
+        "potentially_impacted_files": impacted,
+        "total_impacted": len(impacted),
+        "direct_count": sum(
+            x["dependency_depth"] == 1
+            for x in impacted
+        ),
+        "indirect_count": sum(
+            x["dependency_depth"] > 1
+            for x in impacted
+        )
+    }
 
 
 if __name__ == "__main__":
