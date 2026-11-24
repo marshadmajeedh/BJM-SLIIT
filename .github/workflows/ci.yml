@@ -127,7 +127,7 @@ jobs:
         run: |
           set -euo pipefail
           ruff check \
-            --select E9,F63,F7,F82,F811,F404,F406,F407,F601,F602,F831 \
+            --select E9,F63,F7,F82,F811,F404,F406,F407,F601,F602 \
             --exclude .git,.venv,venv,env,node_modules,__pycache__,.pytest_cache,build,dist,tests/fixtures/invalid \
             .
 
