@@ -123,7 +123,7 @@ python -m pip check
 python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('.').rglob('*.py') if not any(x in p.parts for x in {'.git','.venv','venv','node_modules','__pycache__'})]"
 
 # 3. Critical Ruff lint checks (install ruff first if not installed: pip install ruff)
-ruff check --select E9,F63,F7,F82,F811,F404,F406,F407,F601,F602,F831 .
+ruff check --select E9,F63,F7,F82,F811,F404,F406,F407,F601,F602 .
 
 # 4. Run pytest suite (no LLM API keys required)
 pytest -v --tb=short
