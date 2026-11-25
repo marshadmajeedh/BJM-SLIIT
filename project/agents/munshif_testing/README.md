@@ -16,3 +16,5 @@ proposals = generate_tests(repo_path, codebase_report, generate, requirements)
 The report must contain at least one changed file. Pass the resulting scenarios to the orchestrator for review and verification. A discounted refund expectation such as 900 for a 1000 payment at 10% is an assumption unless supported by the target's requirements; it is not evidence of a failure.
 
 Install the optional adapter with `python -m pip install -r project/requirements.txt`. To generate JSON from a saved codebase-agent report, run `python -m project.agents.munshif_testing . impact.json --requirements "State the approved business rules here"`. Set `GROQ_API_KEY` and `GROQ_MODEL` in the environment first. Save output only after checking it for sensitive information.
+
+See `docs/examples/mini_pos_generation.md` and its accompanying JSON for a generated example and its observed execution result. The example is based on a simulated change and must not be presented as an actual regression.
