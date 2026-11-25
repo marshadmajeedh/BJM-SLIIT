@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.pytest_cache/
+.coverage
+.coverage.*
+sample_projects/**/coverage.json
+sample_projects/**/report.json
