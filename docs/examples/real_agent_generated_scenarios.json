@@ -1,0 +1,37 @@
+{
+  "agent": "RegressionTestGenerationAgent",
+  "status": "proposed",
+  "executed": false,
+  "scenarios": [
+    {
+      "title": "Read inside success",
+      "rationale": "Verify that _read_inside returns the exact file contents for a valid Python file located inside the repository root.",
+      "assumptions": "Path.is_relative_to works (Python 3.9+). The temporary directory provided by pytest's tmp_path fixture is used as the repository root. The file exists and has a .py suffix.",
+      "test_code": "import pytest\nfrom pathlib import Path\nfrom project.agents.munshif_testing.agent import _read_inside\n\ndef test_read_inside_success(tmp_path: Path):\n    root = tmp_path\n    file_path = root / \"module.py\"\n    file_path.write_text(\"x = 1\", encoding=\"utf-8\")\n    content = _read_inside(root, \"module.py\")\n    assert content == \"x = 1\"\n"
+    },
+    {
+      "title": "Read inside invalid cases",
+      "rationale": "Ensure that _read_inside raises ValueError for paths that are outside the repo, have a non\u2011.py suffix, or refer to a directory instead of a file.",
+      "assumptions": "Path.is_relative_to correctly identifies paths outside the root. The function validates both the suffix and that the target is a regular file.",
+      "test_code": "import pytest\nfrom pathlib import Path\nfrom project.agents.munshif_testing.agent import _read_inside\n\ndef test_read_inside_invalid_cases(tmp_path: Path):\n    root = tmp_path\n    # Outside the repository\n    with pytest.raises(ValueError):\n        _read_inside(root, \"../outside.py\")\n    # Wrong file suffix\n    (root / \"data.txt\").write_text(\"text\", encoding=\"utf-8\")\n    with pytest.raises(ValueError):\n        _read_inside(root, \"data.txt\")\n    # Directory instead of file\n    (root / \"pkg\").mkdir()\n    with pytest.raises(ValueError):\n        _read_inside(root, \"pkg\")\n"
+    },
+    {
+      "title": "Generate tests happy path",
+      "rationale": "Validate that generate_tests correctly builds the prompt, calls the model, parses a well\u2011formed response, and returns the scenario list without executing any tests.",
+      "assumptions": "The dummy model receives the full JSON prompt and returns a JSON string. The impact report contains at least one changed_file entry. No existing test files are required for this scenario.",
+      "test_code": "import json\nimport pytest\nfrom pathlib import Path\nfrom project.agents.munshif_testing.agent import generate_tests\n\ndef test_generate_tests_happy_path(tmp_path: Path):\n    # Create a simple source file referenced in the impact report\n    src = tmp_path / \"calc.py\"\n    src.write_text(\"def add(a, b): return a + b\", encoding=\"utf-8\")\n    impact = {\"source_path\": \".\", \"reports\": [{\"changed_file\": \"calc.py\"}]}\n    def model(prompt: str) -> str:\n        # The prompt should contain the changed file name\n        assert \"calc.py\" in prompt\n        return json.dumps({\"scenarios\": [{\"title\": \"add zero\", \"rationale\": \"basic edge\", \"assumptions\": \"add works for zero\", \"test_code\": \"from calc import add\\ndef test_add_zero():\\n    assert add(0, 0) == 0\\n\"}]})\n    result = generate_tests(tmp_path, impact, model)\n    assert result[\"executed\"] is False\n    assert isinstance(result[\"scenarios\"], list)\n    assert result[\"scenarios\"][0][\"title\"] == \"add zero\"\n"
+    },
+    {
+      "title": "Generate tests rejects empty scenarios",
+      "rationale": "The agent must enforce that the model returns a non\u2011empty scenarios list; an empty list should raise a ValueError.",
+      "assumptions": "The model returns syntactically valid JSON but with an empty \"scenarios\" array.",
+      "test_code": "import json\nimport pytest\nfrom pathlib import Path\nfrom project.agents.munshif_testing.agent import generate_tests\n\ndef test_generate_tests_rejects_empty_scenarios(tmp_path: Path):\n    (tmp_path / \"mod.py\").write_text(\"pass\", encoding=\"utf-8\")\n    impact = {\"source_path\": \".\", \"reports\": [{\"changed_file\": \"mod.py\"}]}\n    def model(_):\n        return json.dumps({\"scenarios\": []})\n    with pytest.raises(ValueError):\n        generate_tests(tmp_path, impact, model)\n"
+    },
+    {
+      "title": "Generate tests missing required fields",
+      "rationale": "Each scenario must contain non\u2011empty string values for title, rationale, assumptions, and test_code. Missing or empty fields should trigger validation errors.",
+      "assumptions": "The model returns a scenario where some fields are empty strings, which the agent treats as invalid.",
+      "test_code": "import json\nimport pytest\nfrom pathlib import Path\nfrom project.agents.munshif_testing.agent import generate_tests\n\ndef test_generate_tests_missing_fields(tmp_path: Path):\n    (tmp_path / \"mod.py\").write_text(\"pass\", encoding=\"utf-8\")\n    impact = {\"source_path\": \".\", \"reports\": [{\"changed_file\": \"mod.py\"}]}\n    def model(_):\n        # All fields are present but some are empty after stripping\n        return json.dumps({\"scenarios\": [{\"title\": \"incomplete\", \"rationale\": \"\", \"assumptions\": \"\", \"test_code\": \"\"}]})\n    with pytest.raises(ValueError):\n        generate_tests(tmp_path, impact, model)\n"
+    }
+  ]
+}
