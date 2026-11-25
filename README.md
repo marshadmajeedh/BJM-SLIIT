@@ -1,5 +1,7 @@
 # ChangeGuard AI
 
+> **Feature branch update:** This branch includes the codebase intelligence, regression test generation, and verification prototypes. For Munshif's module, start with the [module file guide](project/agents/munshif_testing/STRUCTURE.md) and [usage instructions](project/agents/munshif_testing/README.md). Orchestrator/backend integration, the dashboard, and comparative benchmarks remain in development.
+
 **A Multi-Agent Framework for Requirement-Aware Software Change Impact Analysis, Automated Patch Generation and Regression Verification**
 
 ![Competition](https://img.shields.io/badge/Competition-Innodata%20AI%20Catalyst%202026-0A66C2)

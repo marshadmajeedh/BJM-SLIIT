@@ -2,6 +2,7 @@
 
 The caller supplies an LLM function; this module never executes generated code.
 """
+
 import ast
 import json
 from pathlib import Path
@@ -27,14 +28,19 @@ def generate_tests(repository_path, impact_report, model, requirements=""):
     files = set()
     for report in impact_report.get("reports", []):
         files.add(report["changed_file"])
-        for item in report.get("impact_analysis", {}).get("potentially_impacted_files", []):
+        for item in report.get("impact_analysis", {}).get(
+            "potentially_impacted_files", []
+        ):
             files.add((source / item["file"]).relative_to(root).as_posix())
     if not files:
         raise ValueError("Impact report contains no changed files")
     context = {name: _read_inside(root, name) for name in sorted(files)}
     tests = {}
     for path in sorted(root.rglob("test_*.py")):
-        if any(part in {".git", ".venv", "venv", "__pycache__"} for part in path.relative_to(root).parts):
+        if any(
+            part in {".git", ".venv", "venv", "__pycache__"}
+            for part in path.relative_to(root).parts
+        ):
             continue
         if path.resolve().is_relative_to(root):
             tests[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
@@ -46,19 +52,37 @@ def generate_tests(repository_path, impact_report, model, requirements=""):
         "focusing on changed behavior and plausible missing edge cases. Include "
         "refund, discount, checkout interactions when relevant. Do not invent business "
         "rules: explicitly mark assumptions and require human review. Do not claim "
-        "tests were executed or that a bug is proven.\nDATA:\n" + json.dumps({
-            "impact_report": impact_report, "source": context,
-            "existing_tests": tests, "requirements": requirements,
-        }, ensure_ascii=False)
+        "tests were executed or that a bug is proven.\nDATA:\n"
+        + json.dumps(
+            {
+                "impact_report": impact_report,
+                "source": context,
+                "existing_tests": tests,
+                "requirements": requirements,
+            },
+            ensure_ascii=False,
+        )
     )
     result = json.loads(model(prompt))
     scenarios = result.get("scenarios") if isinstance(result, dict) else None
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("Model must return a nonempty scenarios list")
     for scenario in scenarios:
-        if not isinstance(scenario, dict) or any(not isinstance(scenario.get(k), str) or not scenario[k].strip() for k in ("title", "rationale", "assumptions", "test_code")):
+        if not isinstance(scenario, dict) or any(
+            not isinstance(scenario.get(k), str) or not scenario[k].strip()
+            for k in ("title", "rationale", "assumptions", "test_code")
+        ):
             raise ValueError("Invalid scenario fields")
         tree = ast.parse(scenario["test_code"])
-        if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_") for n in tree.body):
+        if not any(
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("test_")
+            for n in tree.body
+        ):
             raise ValueError("Each scenario must contain a pytest test function")
-    return {"agent": "RegressionTestGenerationAgent", "status": "proposed", "executed": False, "scenarios": scenarios}
+    return {
+        "agent": "RegressionTestGenerationAgent",
+        "status": "proposed",
+        "executed": False,
+        "scenarios": scenarios,
+    }

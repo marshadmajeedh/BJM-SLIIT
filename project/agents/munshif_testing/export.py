@@ -1,4 +1,5 @@
 """Export proposed scenarios for human review, never execute them."""
+
 import ast
 from pathlib import Path
 
@@ -16,7 +17,11 @@ def export_scenarios(proposals, output_dir):
         if not isinstance(code, str):
             raise ValueError("Missing test code")
         tree = ast.parse(code)
-        if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_") for n in tree.body):
+        if not any(
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("test_")
+            for n in tree.body
+        ):
             raise ValueError("Scenario has no test function")
         codes.append(code)
     output = Path(output_dir)
