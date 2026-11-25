@@ -1,5 +1,7 @@
 # Regression test generation agent
 
+For a file-by-file map of this module and related tests, see [STRUCTURE.md](STRUCTURE.md).
+
 `generate_tests(repository_path, impact_report, model, requirements="")` consumes the codebase agent's report, reads affected Python files and existing `test_*.py` files, and asks a model for structured pytest scenarios. It checks the response structure and Python syntax; it does not execute generated code or establish test coverage or a failure. Review assumptions, imports and expected values before passing tests to the verification agent.
 
 Use a callable accepting a prompt and returning JSON text. `groq_model.generate` is an optional adapter requiring the `groq` package and `GROQ_API_KEY` and `GROQ_MODEL` environment variables. It sends the selected source, existing tests, impact report and requirements to Groq: use it only when the data may be shared. No model is called automatically. Model output is untrusted code and must be reviewed and run only in an appropriate isolated environment. Existing test discovery is limited to files named `test_*.py`; their presence is not proof of coverage.
