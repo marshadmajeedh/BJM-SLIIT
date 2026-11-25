@@ -9,26 +9,35 @@ root = Path(__file__).resolve().parents[2]
 def run_tests(project_name):
     repo_path = root / "sample_projects" / project_name
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/", "-q"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=60
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "-q"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
 
-    if result.returncode == 0:
-        return "passed"
+        if result.returncode == 0:
+            return "passed"
 
-    if result.returncode == 1:
-        return "failed"
+        if result.returncode == 1:
+            return "failed"
 
-    return "execution_error"
+        return "execution_error"
+
+    except (subprocess.TimeoutExpired, OSError):
+        return "execution_error"
 
 
-def detect_regression():
+def detect_regression(modified_status=None):
     baseline = run_tests("refund_baseline")
-    modified = run_tests("refund_demo")
+
+    modified = (
+        modified_status
+        if modified_status is not None
+        else run_tests("refund_demo")
+    )
 
     if "execution_error" in [baseline, modified]:
         status = "Verification incomplete"
