@@ -10,3 +10,5 @@ The repository currently has no Marsadh orchestrator implementation. These Pytho
 These functions perform no automatic transition from generation to execution. The verification runner executes Python code and is not itself a sandbox. Model input includes affected source and discovered tests, so an external provider must only receive data the user is authorized to share. A model proposal, execution result, and human-reviewed business expectation are distinct artifacts.
 
 `tests/test_agent_handoff_integration.py` exercises these interfaces against a real temporary Git change and a deterministic model stub. It validates the handoff, not model quality or production isolation.
+
+The default pytest suite is scoped to `tests/` via `pytest.ini`. The separate `sample_projects/refund_demo/tests` directory contains an intentionally failing demonstration and can be run explicitly when collecting that demonstration's evidence.
