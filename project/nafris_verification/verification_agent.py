@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 from pathlib import Path
+
 from report_parser import parse_report
 from failure_analyzer import analyze_failure
 from ai_analyzer import analyze_with_ai
@@ -13,15 +14,13 @@ folder = Path(__file__).resolve().parent
 
 
 def verify():
+
     subprocess.run(
         [sys.executable, str(folder / "test_runner.py")],
         check=True
     )
 
-    repo_path = (
-        folder.parents[1]
-        / "sample_projects/refund_demo"
-    )
+    repo_path = folder.parents[1] / "sample_projects/refund_demo"
 
     report_path = repo_path / "report.json"
     coverage_path = repo_path / "coverage.json"
@@ -30,7 +29,18 @@ def verify():
 
     result["coverage"] = analyze_coverage(coverage_path)
 
-    result["regression"] = detect_regression()
+    # Reuse existing modified test result
+    status_map = {
+        0: "passed",
+        1: "failed"
+    }
+
+    modified_status = status_map.get(
+        result["exit_code"],
+        "execution_error"
+    )
+
+    result["regression"] = detect_regression(modified_status)
 
     for failure in result["failures"]:
 
@@ -42,6 +52,7 @@ def verify():
             failure["ai_analysis"] = analyze_with_ai(
                 failure["evidence"]
             )
+
             failure["ai_status"] = "success"
 
         except Exception as error:
