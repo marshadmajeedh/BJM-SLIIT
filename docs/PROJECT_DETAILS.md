@@ -1,0 +1,9 @@
+# Project details
+
+## AI disclosure
+
+OpenAI Codex was used as a coding assistant for the Munshif regression test generation module. The module supports an optional Groq API model configured by the team through `GROQ_MODEL`; the actual model and service used for each run should be recorded by the team. Other AI tools and models used by team members must also be disclosed here.
+
+The documented Mini POS example used `openai/gpt-oss-120b` through Groq. See `docs/examples/mini_pos_generation.md` for its inputs, assumptions, and execution result.
+
+The same Groq model generated tests for the actual ChangeGuard test-generation agent; see `docs/examples/real_agent_generation.md` for the selected Git revisions and measured results.
