@@ -1,0 +1,9 @@
+# Real ChangeGuard agent: generation and verification
+
+On 25 November 2026, the codebase agent compared feature commit `282e08cda7eb68bb7eedd43f7828fed1abe77325` with develop commit `1924f83b4aa7b8722d2258bcb290d4d5847e4e06`. The result was restricted to the actual changed file `project/agents/munshif_testing/agent.py`. This file is new relative to develop; this example does not claim a regression in previously deployed code. The codebase agent's static dependency analysis has limitations and does not prove that all affected modules are identified.
+
+The generator used Groq `openai/gpt-oss-120b`, the selected impact report, affected source, discovered test files, and a request to test documented behavior without real network calls. `real_agent_generated_scenarios.json` is the original generated response. Its `executed: false` means the generator did not execute the proposals; the separate verification described below ran reviewed copies. Some generated tests overlap existing tests, and no coverage improvement has been measured.
+
+After inspecting the five generated test files, they were exported to a temporary copy of the actual `project` directory and run with `run_reviewed_tests` using Python 3.12, pytest 9.2 and pytest-json-report 1.5. The returned result was `status: completed`, `total_tests: 5`, `passed: 5`, `failed: 0`, `exit_code: 0`, and `failures: []`. No live model call occurred inside the generated tests. A temporary copy is not a security sandbox.
+
+This is an actual test of ChangeGuard's generation agent, not an external customer's refund or checkout application. The sample Mini POS demonstration is separately documented. Passing these five tests does not establish production readiness, actual customer coverage, or a single-agent benchmark. Orchestration and backend implementation remain necessary for the full end-to-end product.

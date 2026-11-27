@@ -1,0 +1,31 @@
+{
+  "agent": "RegressionTestGenerationAgent",
+  "status": "proposed",
+  "executed": false,
+  "scenarios": [
+    {
+      "title": "apply_discount_premium_and_regular",
+      "rationale": "Verify that the discount logic applies a 10% reduction for premium customers and leaves other customers unchanged, including edge cases of zero and negative totals.",
+      "assumptions": "apply_discount returns total * 0.90 for customer_type == \"premium\"; no validation of total sign; function is pure and deterministic.",
+      "test_code": "import pytest\nfrom sample_projects.mini_pos.billing import apply_discount\n\ndef test_apply_discount_premium():\n    assert apply_discount(1000, \"premium\") == 900\n\ndef test_apply_discount_regular():\n    assert apply_discount(1000, \"regular\") == 1000\n\ndef test_apply_discount_zero_total():\n    assert apply_discount(0, \"premium\") == 0\n\ndef test_apply_discount_negative_total():\n    # Assuming the function does not guard against negative totals\n    assert apply_discount(-500, \"premium\") == -450"
+    },
+    {
+      "title": "checkout_integration_with_calculate_total_and_discount",
+      "rationale": "Ensure checkout correctly composes calculate_total and apply_discount, handling typical, large, and floating\u2011point inputs.",
+      "assumptions": "checkout calls calculate_total(price, quantity) then apply_discount on the result; price and quantity are numeric (int or float); discount rules are as defined in apply_discount.",
+      "test_code": "import pytest\nfrom sample_projects.mini_pos.billing import checkout\n\n@pytest.mark.parametrize(\"price,quantity,customer_type,expected\", [\n    (10, 5, \"premium\", 45.0),   # 10*5=50, 10% off => 45\n    (20, 3, \"regular\", 60),    # no discount\n    (0.99, 100, \"premium\", 89.1), # 0.99*100=99, 10% off => 89.1\n    (1e6, 2, \"premium\", 1.8e6), # large numbers\n])\ndef test_checkout_various(price, quantity, customer_type, expected):\n    assert checkout(price, quantity, customer_type) == expected"
+    },
+    {
+      "title": "calculate_refund_uses_apply_discount",
+      "rationale": "Validate that refunds.calculate_refund mirrors the discount logic from billing.apply_discount, confirming the direct dependency after the change.",
+      "assumptions": "calculate_refund simply forwards its arguments to apply_discount; no additional logic is added; customer_type handling is identical to apply_discount.",
+      "test_code": "import pytest\nfrom sample_projects.mini_pos.refunds import calculate_refund\n\ndef test_refund_premium():\n    assert calculate_refund(2000, \"premium\") == 1800\n\ndef test_refund_regular():\n    assert calculate_refund(2000, \"regular\") == 2000\n\ndef test_refund_unknown_customer_type():\n    # Assuming unknown types are treated as non\u2011premium (no discount)\n    assert calculate_refund(1500, \"guest\") == 1500"
+    },
+    {
+      "title": "generate_sales_report_reflects_checkout_output",
+      "rationale": "Confirm that reports.generate_sales_report returns a dictionary with the correct total_sales value derived from checkout, covering premium and regular customers.",
+      "assumptions": "generate_sales_report calls checkout internally; the returned dict always contains the key \"total_sales\"; no error handling for invalid inputs is present.",
+      "test_code": "import pytest\nfrom sample_projects.mini_pos.reports import generate_sales_report\n\n@pytest.mark.parametrize(\"price,quantity,customer_type,expected\", [\n    (15, 2, \"premium\", 27.0),   # 15*2=30, 10% off => 27\n    (15, 2, \"regular\", 30),\n])\ndef test_generate_sales_report(price, quantity, customer_type, expected):\n    result = generate_sales_report(price, quantity, customer_type)\n    assert isinstance(result, dict)\n    assert result.get(\"total_sales\") == expected"
+    }
+  ]
+}
