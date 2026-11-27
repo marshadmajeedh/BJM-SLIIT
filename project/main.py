@@ -38,7 +38,11 @@ from project.marsadh_orchestrator.orchestrator import (
     RunNotFoundError,
     ValidationInputError,
 )
-from project.marsadh_orchestrator.store import RunStore, redact_secrets
+from project.marsadh_orchestrator.store import (
+    RunStore,
+    redact_nested_secrets,
+    redact_secrets,
+)
 from project.marsadh_orchestrator.workspace import WorkspaceManager
 
 logger = logging.getLogger("changeguard.api")
@@ -52,10 +56,11 @@ def _error_response(
     details: dict | None = None,
     run_id: str | None = None,
 ) -> JSONResponse:
+    sanitized_details = redact_nested_secrets(details or {})
     payload = ErrorResponse(
         code=code,
         message=redact_secrets(message),
-        details=details or {},
+        details=sanitized_details if isinstance(sanitized_details, dict) else {},
         run_id=run_id,
     )
     return JSONResponse(

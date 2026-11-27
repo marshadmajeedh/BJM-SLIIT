@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from project.marsadh_orchestrator.store import redact_secrets
+from project.marsadh_orchestrator.store import redact_nested_secrets, redact_secrets
 from project.schemas import (
     AgentError,
     AgentExecutionRecord,
@@ -294,13 +294,11 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
 def _sanitize_error(error: AgentError | None) -> AgentError | None:
     if error is None:
         return None
+    sanitized_details = redact_nested_secrets(error.details)
     return error.model_copy(
         update={
             "message": redact_secrets(error.message),
-            "details": {
-                k: redact_secrets(v) if isinstance(v, str) else v
-                for k, v in error.details.items()
-            },
+            "details": sanitized_details if isinstance(sanitized_details, dict) else {},
         }
     )
 
