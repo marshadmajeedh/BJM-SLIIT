@@ -47,6 +47,11 @@ from .repair import (
     RepairTerminationReason,
 )
 from .requirements import RequirementAnalysisResult
+from .review import (
+    EvidenceReconciliationResult,
+    IndependentReviewRequest,
+    IndependentReviewResult,
+)
 
 SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SAFE_GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/@^~{}][A-Za-z0-9._/@^~{}-]{0,199}$")
@@ -72,6 +77,8 @@ class WorkflowState(str, Enum):
     COMPARING_VERIFICATION_RESULTS = "COMPARING_VERIFICATION_RESULTS"
     EVALUATING_REPAIR_ELIGIBILITY = "EVALUATING_REPAIR_ELIGIBILITY"
     REPAIRING_PATCH = "REPAIRING_PATCH"
+    RUNNING_INDEPENDENT_REVIEW = "RUNNING_INDEPENDENT_REVIEW"
+    RECONCILING_REVIEW_EVIDENCE = "RECONCILING_REVIEW_EVIDENCE"
     RUNNING_VERIFICATION = "RUNNING_VERIFICATION"
     COMPILING_REPORT = "COMPILING_REPORT"
     AWAITING_FINAL_APPROVAL = "AWAITING_FINAL_APPROVAL"
@@ -121,6 +128,7 @@ class CreateRunRequest(BaseModel):
     execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST
     repair_enabled: bool | None = None
     max_repair_attempts: int | None = Field(default=None, ge=0, le=2)
+    require_independent_review: bool | None = None
 
     @field_validator("repository_path", "source_path", "base_ref", "requirements")
     @classmethod
@@ -362,6 +370,10 @@ class WorkflowRunRecord(BaseModel):
     modified_verification: ModifiedVerificationResult | None = None
     baseline_comparison: BaselineComparisonEvidence | None = None
     verification: VerificationResult | None = None
+    require_independent_review: bool = False
+    independent_review_request: IndependentReviewRequest | None = None
+    independent_review: IndependentReviewResult | None = None
+    review_reconciliation: EvidenceReconciliationResult | None = None
     report: ChangePackageReport | None = None
     final_decision: HumanDecisionRecord | None = None
     error: AgentError | None = None

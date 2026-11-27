@@ -30,10 +30,14 @@ from typing import Any
 
 from project.marsadh_orchestrator.adapters import (
     CodebaseAdapter,
+    IndependentReviewAdapter,
     PatchGenerationAdapter,
     TestingAdapter,
     VerificationAdapter,
     build_approved_test_specs,
+)
+from project.marsadh_orchestrator.adapters.review_adapter import (
+    build_known_artifact_registry,
 )
 from project.marsadh_orchestrator.baseline_verification import (
     BaselineComparisonEngine,
@@ -56,6 +60,11 @@ from project.marsadh_orchestrator.repair_engine import (
 from project.marsadh_orchestrator.requirement_analyst import (
     DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     RequirementAnalystAgent,
+)
+from project.marsadh_orchestrator.review_reconciliation import (
+    EvidenceReconciliationEngine,
+    evaluate_approval_policy,
+    verify_candidate_evidence_integrity,
 )
 from project.marsadh_orchestrator.store import (
     RunStore,
@@ -82,10 +91,13 @@ from project.schemas import (
     ChangePackageReport,
     CodebaseAnalysisResult,
     CreateRunRequest,
+    EvidenceReconciliationResult,
     ExecutionMode,
     HumanDecision,
     HumanDecisionRecord,
     HumanDecisionRequest,
+    IndependentReviewRequest,
+    IndependentReviewResult,
     IndividualTestOutcome,
     ModifiedVerificationResult,
     PatchAttemptRecord,
@@ -100,6 +112,9 @@ from project.schemas import (
     RepositoryInfo,
     RequirementAnalysisResult,
     RequirementTraceability,
+    ReviewAvailabilityStatus,
+    ReviewModelMetadata,
+    ReviewRecommendation,
     RiskSummary,
     TestComparisonClassification,
     TestGenerationResult,
@@ -150,6 +165,8 @@ ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
         WorkflowState.COMPARING_VERIFICATION_RESULTS,
         WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
         WorkflowState.REPAIRING_PATCH,
+        WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+        WorkflowState.RECONCILING_REVIEW_EVIDENCE,
         WorkflowState.RUNNING_VERIFICATION,
         WorkflowState.COMPILING_REPORT,
     }
@@ -192,6 +209,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         {
             WorkflowState.APPLYING_PATCH,
             WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -200,6 +218,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         {
             WorkflowState.ANALYZING_POST_PATCH_IMPACT,
             WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -210,6 +229,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
             WorkflowState.PREPARING_BASELINE,
             WorkflowState.RUNNING_MODIFIED_VERIFICATION,
             WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -250,6 +270,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.COMPARING_VERIFICATION_RESULTS: frozenset(
         {
             WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -257,6 +278,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.EVALUATING_REPAIR_ELIGIBILITY: frozenset(
         {
             WorkflowState.REPAIRING_PATCH,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -265,6 +287,19 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         {
             WorkflowState.VALIDATING_PATCH,
             WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+            WorkflowState.COMPILING_REPORT,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.RUNNING_INDEPENDENT_REVIEW: frozenset(
+        {
+            WorkflowState.RECONCILING_REVIEW_EVIDENCE,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.RECONCILING_REVIEW_EVIDENCE: frozenset(
+        {
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -654,6 +689,7 @@ class OrchestratorService:
         patch_adapter: PatchGenerationAdapter | None = None,
         patch_validator: PatchValidator | None = None,
         patch_applicator: PatchApplicator | None = None,
+        review_adapter: IndependentReviewAdapter | None = None,
         requirement_offline_callable: Callable[[str], str] | None = None,
         requirement_offline_label: str = DEFAULT_OFFLINE_REQUIREMENT_LABEL,
         requirement_live_callable: Callable[[str], str] | None = None,
@@ -666,6 +702,7 @@ class OrchestratorService:
         cleanup_baseline_workspace: bool = True,
         before_baseline_execution_hook: Callable[[WorkflowRunRecord, Path], None] | None = None,
         before_repair_provider_hook: Callable[[WorkflowRunRecord, int], None] | None = None,
+        before_independent_review_hook: Callable[[WorkflowRunRecord], None] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -681,6 +718,7 @@ class OrchestratorService:
         self.patch_adapter = patch_adapter or PatchGenerationAdapter(config=config)
         self.patch_validator = patch_validator or PatchValidator(config=config)
         self.patch_applicator = patch_applicator or PatchApplicator(config=config)
+        self.review_adapter = review_adapter or IndependentReviewAdapter(config=config)
         self.testing_adapter = testing_adapter
         self.verification_adapter = verification_adapter
         self._offline_model_callable = (
@@ -694,6 +732,7 @@ class OrchestratorService:
         self._cleanup_baseline_workspace = cleanup_baseline_workspace
         self._before_baseline_execution_hook = before_baseline_execution_hook
         self._before_repair_provider_hook = before_repair_provider_hook
+        self._before_independent_review_hook = before_independent_review_hook
 
     # ------------------------------------------------------------------
     # Persistence & structured logging helpers
@@ -895,10 +934,15 @@ class OrchestratorService:
                 retryable=False,
             )
             def _mark_interrupted_repair(current: WorkflowRunRecord) -> WorkflowRunRecord:
-                if current.repair_history is None and current.state not in {
+                in_repair_stage = current.state in {
                     WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
                     WorkflowState.REPAIRING_PATCH,
-                }:
+                }
+                repair_unfinished = (
+                    current.repair_history is not None
+                    and current.repair_termination_reason is None
+                )
+                if not in_repair_stage and not repair_unfinished:
                     return current
                 hist_updated = (
                     current.repair_history.model_copy(
@@ -967,6 +1011,11 @@ class OrchestratorService:
             requirements=request.requirements,
             workflow_mode=request.workflow_mode,
             execution_mode=request.execution_mode,
+            require_independent_review=(
+                self.config.require_independent_review
+                if request.require_independent_review is None
+                else request.require_independent_review
+            ),
             repair_policy=repair_policy,
             repair_attempts_consumed=0,
             repository=RepositoryInfo(
@@ -1039,6 +1088,7 @@ class OrchestratorService:
             ),
             output_summary="Started workspace preparation.",
         )
+        ws_ctx = None
         try:
             ws_ctx = self.workspace_manager.prepare_workspace(
                 run_id,
@@ -1057,6 +1107,11 @@ class OrchestratorService:
                 timeout_seconds=self.config.git_timeout_seconds,
             )
         except (WorkspaceSecurityError, UnsupportedWorkspaceStateError, WorkspaceError) as exc:
+            if ws_ctx is not None:
+                try:
+                    self.workspace_manager.cleanup_workspace(ws_ctx.workspace_repo_path)
+                except WorkspaceError:
+                    pass
             dur_ms = int((time.perf_counter() - t0) * 1000)
             err_code = (
                 "WORKSPACE_SECURITY_ERROR"
@@ -1080,6 +1135,11 @@ class OrchestratorService:
             )
             return self._fail_run(run_id, WorkflowState.CREATED, err)
         except Exception as exc:  # noqa: BLE001
+            if ws_ctx is not None:
+                try:
+                    self.workspace_manager.cleanup_workspace(ws_ctx.workspace_repo_path)
+                except WorkspaceError:
+                    pass
             dur_ms = int((time.perf_counter() - t0) * 1000)
             err = AgentError(
                 code="WORKSPACE_UNEXPECTED_ERROR",
@@ -1126,33 +1186,40 @@ class OrchestratorService:
         )
 
         # Persist workspace context & snapshot hashes and transition CREATED -> ANALYZING_REQUIREMENTS
-        run = self.transition_state(
-            run_id,
-            WorkflowState.CREATED,
-            WorkflowState.ANALYZING_REQUIREMENTS,
-            updater=lambda current: current.model_copy(
-                update={
-                    "workspace_id": ws_ctx.workspace_id,
-                    "workspace_path": ws_ctx.workspace_repo_path,
-                    "original_source_snapshot_sha256": snapshot_sha,
-                    "original_git_diff_sha256": diff_sha,
-                    "source_snapshot_sha256": snapshot_sha,
-                    "git_diff_sha256": diff_sha,
-                    "repository": current.repository.model_copy(
-                        update={
-                            "source_path": ws_ctx.source_path,
-                            "base_ref": ws_ctx.base_ref,
-                            "effective_base_ref": ws_ctx.effective_base_ref,
-                            "resolved_base_commit": ws_ctx.resolved_base_commit,
-                            "head_commit": ws_ctx.head_commit,
-                            "change_mode": ws_ctx.change_mode,
-                        }
-                    ),
-                    "agent_records": [*current.agent_records, ws_record],
-                }
-            ),
-            reason="Workspace prepared; starting A1 structured requirement analysis.",
-        )
+        try:
+            run = self.transition_state(
+                run_id,
+                WorkflowState.CREATED,
+                WorkflowState.ANALYZING_REQUIREMENTS,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "workspace_id": ws_ctx.workspace_id,
+                        "workspace_path": ws_ctx.workspace_repo_path,
+                        "original_source_snapshot_sha256": snapshot_sha,
+                        "original_git_diff_sha256": diff_sha,
+                        "source_snapshot_sha256": snapshot_sha,
+                        "git_diff_sha256": diff_sha,
+                        "repository": current.repository.model_copy(
+                            update={
+                                "source_path": ws_ctx.source_path,
+                                "base_ref": ws_ctx.base_ref,
+                                "effective_base_ref": ws_ctx.effective_base_ref,
+                                "resolved_base_commit": ws_ctx.resolved_base_commit,
+                                "head_commit": ws_ctx.head_commit,
+                                "change_mode": ws_ctx.change_mode,
+                            }
+                        ),
+                        "agent_records": [*current.agent_records, ws_record],
+                    }
+                ),
+                reason="Workspace prepared; starting A1 structured requirement analysis.",
+            )
+        except InvalidStateTransitionError:
+            try:
+                self.workspace_manager.cleanup_workspace(ws_ctx.workspace_repo_path)
+            except WorkspaceError:
+                pass
+            raise
 
         # ---- Stage 1: A1 Structured Requirement Analysis ----
         a1_started = utc_now()
@@ -2013,6 +2080,13 @@ class OrchestratorService:
             ),
             output_summary="Invoked PatchValidator.validate.",
         )
+        initial_forbidden_tests = set(
+            discover_existing_regression_tests(
+                ws_ctx.workspace_repo_path,
+                source_path=ws_ctx.source_path,
+                timeout_seconds=self.config.git_timeout_seconds,
+            )
+        )
         try:
             validation_result = self.patch_validator.validate(
                 workspace_repo_path=ws_ctx.workspace_repo_path,
@@ -2023,6 +2097,8 @@ class OrchestratorService:
                 expected_source_snapshot_sha256=original_snapshot_sha,
                 expected_git_diff_sha256=original_diff_sha,
                 valid_criterion_ids=valid_cids,
+                forbidden_paths=initial_forbidden_tests,
+                forbid_test_modifications=True,
             )
         except Exception as exc:  # noqa: BLE001
             val_dur_ms = int((time.perf_counter() - val_t0) * 1000)
@@ -3407,13 +3483,13 @@ class OrchestratorService:
                 output_summary=cmp_summary,
             )
 
-            # Transition COMPARING_VERIFICATION_RESULTS -> COMPILING_REPORT (verify_existing_change)
+            # Transition COMPARING_VERIFICATION_RESULTS -> RUNNING_INDEPENDENT_REVIEW (verify_existing_change)
             # OR COMPARING_VERIFICATION_RESULTS -> EVALUATING_REPAIR_ELIGIBILITY (generate_and_verify_change)
             if run.workflow_mode != WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
                 run = self.transition_state(
                     run_id,
                     WorkflowState.COMPARING_VERIFICATION_RESULTS,
-                    WorkflowState.COMPILING_REPORT,
+                    WorkflowState.RUNNING_INDEPENDENT_REVIEW,
                     updater=lambda current: current.model_copy(
                         update={
                             "verification": ver_result,
@@ -3423,7 +3499,7 @@ class OrchestratorService:
                     ),
                     reason=(
                         f"Baseline-versus-modified comparison finished (status={comparison.status.value}); "
-                        "compiling auditable change package report."
+                        "freezing final candidate evidence for independent review."
                     ),
                 )
             else:
@@ -3581,7 +3657,7 @@ class OrchestratorService:
                     comparison=comparison,
                     ver_result=ver_result,
                 )
-                if run.state != WorkflowState.COMPILING_REPORT:
+                if run.state != WorkflowState.RUNNING_INDEPENDENT_REVIEW:
                     return run
         finally:
             if self._cleanup_baseline_workspace and baseline_workspace_path:
@@ -3589,6 +3665,16 @@ class OrchestratorService:
                     self.workspace_manager.cleanup_workspace(baseline_workspace_path)
                 except WorkspaceError:
                     pass
+
+        # ---- Stage 4E & 4F: RUNNING_INDEPENDENT_REVIEW -> RECONCILING_REVIEW_EVIDENCE -> COMPILING_REPORT ----
+        run = self._execute_independent_review_and_reconciliation(
+            run=run,
+            verification=ver_result,
+            specs=specs,
+            selected_ids=selected_ids,
+        )
+        if run.state != WorkflowState.COMPILING_REPORT:
+            return run
 
         # ---- Stage 5: Compile Auditable Change Package ----
         report_t0 = time.perf_counter()
@@ -3896,7 +3982,7 @@ class OrchestratorService:
             updated_run = self.transition_state(
                 run_id,
                 from_state,
-                WorkflowState.COMPILING_REPORT,
+                WorkflowState.RUNNING_INDEPENDENT_REVIEW,
                 updater=lambda cur: cur.model_copy(
                     update={
                         "repair_attempts_consumed": final_hist.repair_attempts_consumed,
@@ -3905,7 +3991,10 @@ class OrchestratorService:
                         "repair_history": final_hist,
                     }
                 ),
-                reason=f"Bounded repair ended ({reason_enum.value}): {summary_text}",
+                reason=(
+                    f"Bounded repair ended ({reason_enum.value}): {summary_text}. "
+                    "Freezing final candidate evidence for independent review."
+                ),
             )
             return updated_run, last_ver_result
 
@@ -4809,11 +4898,27 @@ class OrchestratorService:
             # 11. Post-patch M01 impact analysis & approved-test assumption preservation check
             m01_started = utc_now()
             m01_t0 = time.perf_counter()
-            new_cb = self.codebase_adapter.analyze(
-                repair_ws_path,
-                source_path=repair_ws_ctx.source_path,
-                base_ref=repair_ws_ctx.effective_base_ref,
-            )
+            try:
+                new_cb = self.codebase_adapter.analyze(
+                    repair_ws_path,
+                    source_path=repair_ws_ctx.source_path,
+                    base_ref=repair_ws_ctx.effective_base_ref,
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self.workspace_manager.cleanup_workspace(repair_ws_path)
+                except WorkspaceError:
+                    pass
+                err = AgentError(
+                    code="M01_POST_PATCH_UNEXPECTED_ERROR",
+                    message=f"Post-patch M01 impact analysis raised an unexpected exception during repair: {exc}",
+                )
+                return (
+                    self._fail_run(
+                        run_id, WorkflowState.ANALYZING_POST_PATCH_IMPACT, err
+                    ),
+                    last_ver_result,
+                )
             m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
             repair_durations["impact_analysis_ms"] = m01_dur_ms
 
@@ -5095,22 +5200,38 @@ class OrchestratorService:
             # 14. Execute unchanged approved verification suite on repaired workspace
             mod_started = utc_now()
             mod_t0 = time.perf_counter()
-            new_mod_res, new_ver_res, new_mod_int_err = execute_snapshot_verification(
-                self.verification_adapter,
-                self.config,
-                snapshot_role="modified",
-                workspace_path=repair_ws_path,
-                source_path=repair_ws_ctx.source_path,
-                selected_test_ids=selected_ids,
-                approved_specs=specs,
-                test_purposes=test_purposes,
-                criterion_ids_by_test=criterion_ids_by_test,
-                is_trusted_workspace=is_trusted_workspace,
-                source_snapshot_sha256=app_result.resulting_source_snapshot_sha256,
-                git_diff_sha256=app_result.resulting_git_diff_sha256,
-                baseline_ref=baseline_ref_label,
-                baseline_commit=resolved_base_commit,
-            )
+            try:
+                new_mod_res, new_ver_res, new_mod_int_err = execute_snapshot_verification(
+                    self.verification_adapter,
+                    self.config,
+                    snapshot_role="modified",
+                    workspace_path=repair_ws_path,
+                    source_path=repair_ws_ctx.source_path,
+                    selected_test_ids=selected_ids,
+                    approved_specs=specs,
+                    test_purposes=test_purposes,
+                    criterion_ids_by_test=criterion_ids_by_test,
+                    is_trusted_workspace=is_trusted_workspace,
+                    source_snapshot_sha256=app_result.resulting_source_snapshot_sha256,
+                    git_diff_sha256=app_result.resulting_git_diff_sha256,
+                    baseline_ref=baseline_ref_label,
+                    baseline_commit=resolved_base_commit,
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self.workspace_manager.cleanup_workspace(repair_ws_path)
+                except WorkspaceError:
+                    pass
+                err = AgentError(
+                    code="M04_REPAIR_UNEXPECTED_ERROR",
+                    message=f"Modified verification raised an unexpected exception during repair: {exc}",
+                )
+                return (
+                    self._fail_run(
+                        run_id, WorkflowState.RUNNING_MODIFIED_VERIFICATION, err
+                    ),
+                    last_ver_result,
+                )
             mod_dur_ms = int((time.perf_counter() - mod_t0) * 1000)
             repair_durations["modified_verification_ms"] = mod_dur_ms
             assert isinstance(new_mod_res, ModifiedVerificationResult)
@@ -5377,6 +5498,581 @@ class OrchestratorService:
             RepairTerminationReason.BUDGET_EXHAUSTED,
             "Bounded repair loop reached its configured maximum iteration bound.",
             history.last_eligibility,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 4 & 5 (P0-9): Independent Review & Evidence Reconciliation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _collect_bounded_review_source_excerpts(
+        workspace_repo_path: str | None,
+        candidate_paths: list[str],
+        *,
+        max_files: int = 10,
+        max_file_bytes: int = 16_384,
+        max_total_bytes: int = 65_536,
+    ) -> dict[str, str]:
+        """Read bounded, non-sensitive relevant source excerpts for A6 review only."""
+        if not workspace_repo_path:
+            return {}
+        ws_root_raw = Path(workspace_repo_path)
+        if not ws_root_raw.is_dir():
+            return {}
+        ws_root = ws_root_raw.resolve(strict=True)
+        sensitive_names = frozenset(
+            {".env", "id_rsa", "id_ed25519", "secrets.py", "credentials.py"}
+        )
+        excerpts: dict[str, str] = {}
+        total_bytes = 0
+        for raw_rel in candidate_paths:
+            if len(excerpts) >= max_files:
+                break
+            rel_posix = raw_rel.strip().replace("\\", "/").lstrip("./")
+            if not rel_posix or ".." in PurePath(rel_posix).parts:
+                continue
+            fname = PurePath(rel_posix).name.lower()
+            if (
+                fname in sensitive_names
+                or fname.startswith(".env")
+                or fname.endswith((".pem", ".key"))
+            ):
+                continue
+            target = ws_root / rel_posix
+            if target.is_symlink() or not target.is_file():
+                continue
+            try:
+                resolved = target.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_relative_to(ws_root):
+                continue
+            try:
+                raw_bytes = resolved.read_bytes()
+            except OSError:
+                continue
+            if len(raw_bytes) > max_file_bytes or total_bytes + len(raw_bytes) > max_total_bytes:
+                continue
+            try:
+                text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            excerpts[rel_posix] = redact_secrets(text)
+            total_bytes += len(raw_bytes)
+        return excerpts
+
+    def _build_independent_review_request(
+        self,
+        *,
+        run: WorkflowRunRecord,
+        verification: VerificationResult,
+        criterion_traceability: list[RequirementTraceability],
+        existing_limitations: list[str],
+    ) -> IndependentReviewRequest:
+        """Assemble bounded, frozen candidate evidence for A6 independent review."""
+        req_analysis = run.requirement_analysis
+        cb = run.codebase_analysis
+        changed_files = list(cb.changed_files_repo_relative) if cb else []
+        impacted_modules = list(cb.impacted_modules_repo_relative) if cb else []
+
+        candidate_proposal_id = (
+            run.repair_history.final_candidate_proposal_id
+            if run.repair_history is not None
+            and run.repair_history.final_candidate_proposal_id
+            else (
+                run.patch_generation.proposal.proposal_id
+                if run.patch_generation is not None
+                and run.patch_generation.proposal is not None
+                else None
+            )
+        )
+        candidate_patch_sha256 = (
+            run.repair_history.final_candidate_patch_sha256
+            if run.repair_history is not None
+            and run.repair_history.final_candidate_patch_sha256
+            else run.patch_proposal_sha256
+        )
+        candidate_attempt_number = (
+            run.repair_history.final_candidate_attempt_number
+            if run.repair_history is not None
+            and run.repair_history.final_candidate_attempt_number is not None
+            else run.patch_attempt_number
+        )
+        unified_diff: str | None = None
+        if (
+            run.patch_generation is not None
+            and run.patch_generation.proposal is not None
+        ):
+            unified_diff = redact_secrets(run.patch_generation.proposal.unified_diff)[
+                :200_000
+            ]
+        elif run.workspace_path and Path(run.workspace_path).is_dir():
+            effective_base = run.repository.effective_base_ref or run.repository.base_ref
+            pathspec = (
+                "."
+                if run.repository.source_path in {"", "."}
+                else run.repository.source_path
+            )
+            try:
+                diff_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(Path(run.workspace_path).resolve()),
+                        "diff",
+                        "--no-ext-diff",
+                        effective_base,
+                        "--",
+                        pathspec,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.git_timeout_seconds,
+                    check=False,
+                )
+                if diff_proc.returncode == 0 and diff_proc.stdout.strip():
+                    unified_diff = redact_secrets(diff_proc.stdout)[:200_000]
+            except (subprocess.TimeoutExpired, OSError):
+                unified_diff = None
+
+        ordered_rel_paths: list[str] = []
+        for p in (*changed_files, *impacted_modules):
+            if p not in ordered_rel_paths:
+                ordered_rel_paths.append(p)
+        relevant_excerpts = self._collect_bounded_review_source_excerpts(
+            run.workspace_path,
+            ordered_rel_paths,
+        )
+
+        impact_summary = (
+            [
+                {
+                    "repo_relative_path": fi.repo_relative_path,
+                    "changed_functions": list(fi.changed_functions),
+                    "changed_lines": list(fi.changed_lines),
+                    "direct_count": fi.direct_count,
+                    "indirect_count": fi.indirect_count,
+                }
+                for fi in cb.file_impacts
+            ]
+            if cb is not None
+            else []
+        )
+
+        comparison = run.baseline_comparison or verification.baseline_comparison
+        verification_summary: dict[str, Any] = {
+            "execution_status": verification.execution_status,
+            "verification_outcome": verification.verification_outcome.value,
+            "verification_passed": verification.verification_passed,
+            "exit_code": verification.exit_code,
+            "total_tests": verification.total_tests,
+            "passed": verification.passed,
+            "failed": verification.failed,
+            "executed_test_ids": list(verification.executed_test_ids),
+            "collection_error_count": len(verification.collection_errors),
+            "failure_diagnostics": [
+                {
+                    "test_name": f.test_name,
+                    "status": f.status,
+                    "error_type": f.error_type,
+                    "reason": redact_secrets(f.reason),
+                }
+                for f in verification.failures[:20]
+            ],
+        }
+        baseline_comparison_summary: dict[str, Any] = {
+            "status": comparison.status.value,
+            "approved_test_hashes_verified": comparison.approved_test_hashes_verified,
+            "has_confirmed_regression": comparison.summary.has_confirmed_regression,
+            "regression_safety_established": comparison.summary.regression_safety_established,
+            "preserved_behaviors": list(comparison.summary.preserved_behaviors),
+            "newly_introduced_failures": list(
+                comparison.summary.newly_introduced_failures
+            ),
+            "newly_satisfied_acceptance_criteria": list(
+                comparison.summary.newly_satisfied_acceptance_criteria
+            ),
+            "fixed_existing_failures": list(comparison.summary.fixed_existing_failures),
+            "persistent_failures": list(comparison.summary.persistent_failures),
+            "unavailable_or_incomparable": list(
+                comparison.summary.unavailable_or_incomparable
+            ),
+        }
+
+        repair_attempt_summary: list[dict[str, Any]] = []
+        if run.repair_history is not None:
+            for att in run.repair_history.attempts:
+                repair_attempt_summary.append(
+                    {
+                        "attempt_number": att.attempt_number,
+                        "attempt_type": att.attempt_type,
+                        "patch_proposal_id": att.patch_proposal_id,
+                        "patch_sha256": att.patch_sha256,
+                        "outcome": att.outcome,
+                        "is_deterministic_fixture": att.is_deterministic_fixture,
+                    }
+                )
+
+        approved_ids = (
+            list(run.test_review.selected_test_ids)
+            if run.test_review is not None and run.test_review.approved
+            else []
+        )
+        approved_hashes = (
+            dict(run.test_review.approved_test_hashes)
+            if run.test_review is not None and run.test_review.approved
+            else {}
+        )
+
+        draft_req = IndependentReviewRequest(
+            run_id=run.run_id,
+            workflow_mode=run.workflow_mode.value,
+            execution_mode=run.execution_mode.value,
+            original_requirement=run.requirements,
+            acceptance_criteria=(
+                list(req_analysis.acceptance_criteria) if req_analysis else []
+            ),
+            business_constraints=(
+                list(req_analysis.business_constraints) if req_analysis else []
+            ),
+            unresolved_assumptions=(
+                list(req_analysis.assumptions) if req_analysis else []
+            ),
+            unresolved_ambiguities=(
+                [amb for amb in req_analysis.ambiguities if not amb.resolved]
+                if req_analysis
+                else []
+            ),
+            candidate_proposal_id=candidate_proposal_id,
+            candidate_patch_sha256=candidate_patch_sha256,
+            candidate_attempt_number=candidate_attempt_number,
+            original_source_snapshot_sha256=run.original_source_snapshot_sha256,
+            baseline_source_snapshot_sha256=run.baseline_source_snapshot_sha256,
+            modified_source_snapshot_sha256=run.source_snapshot_sha256,
+            modified_git_diff_sha256=run.git_diff_sha256,
+            candidate_unified_diff=unified_diff,
+            relevant_source_excerpts=relevant_excerpts,
+            relevant_source_file_paths=sorted(relevant_excerpts.keys()),
+            changed_files=changed_files,
+            impacted_modules=impacted_modules,
+            impact_summary=impact_summary,
+            approved_test_ids=approved_ids,
+            approved_test_hashes=approved_hashes,
+            verification_summary=verification_summary,
+            baseline_comparison_summary=baseline_comparison_summary,
+            requirement_traceability=criterion_traceability,
+            repair_attempt_summary=repair_attempt_summary,
+            repair_termination_reason=(
+                run.repair_termination_reason.value
+                if run.repair_termination_reason is not None
+                else None
+            ),
+            existing_evidence_limitations=list(existing_limitations),
+        )
+        known_reg = build_known_artifact_registry(draft_req)
+        return draft_req.model_copy(
+            update={
+                "known_artifact_ids": {
+                    k: sorted(v) for k, v in known_reg.items() if v
+                }
+            }
+        )
+
+    def _execute_independent_review_and_reconciliation(
+        self,
+        *,
+        run: WorkflowRunRecord,
+        verification: VerificationResult,
+        specs: Mapping[str, ApprovedTestSpec],
+        selected_ids: list[str],
+    ) -> WorkflowRunRecord:
+        """Freeze candidate evidence, invoke injectable A6 adapter, and reconcile deterministically.
+
+        Starts in ``RUNNING_INDEPENDENT_REVIEW`` and transitions through
+        ``RECONCILING_REVIEW_EVIDENCE`` into ``COMPILING_REPORT`` (or ``FAILED``
+        on hard workspace/candidate integrity failure). Never triggers additional
+        patch repair and never auto-approves.
+        """
+        run_id = run.run_id
+
+        # 1. Freeze final candidate evidence: verify workspace snapshot & approved test hashes
+        try:
+            self._verify_workspace_snapshot(run)
+        except WorkflowIntegrityError as exc:
+            err = AgentError(code=exc.code, message=exc.message, details=exc.details)
+            self._log(
+                run_id=run_id,
+                agent_name="IntegrityVerifier",
+                stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+                status=AgentExecutionStatus.FAILED,
+                output_summary=exc.message,
+                error=err,
+            )
+            return self._fail_run(
+                run_id, WorkflowState.RUNNING_INDEPENDENT_REVIEW, err
+            )
+
+        if run.workspace_path:
+            tests_ok, _verified, test_err = self._verify_approved_tests_in_workspace(
+                run.workspace_path, specs, selected_ids
+            )
+            if not tests_ok and test_err is not None:
+                self._log(
+                    run_id=run_id,
+                    agent_name="IntegrityVerifier",
+                    stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+                    status=AgentExecutionStatus.FAILED,
+                    output_summary=test_err.message,
+                    error=test_err,
+                )
+                return self._fail_run(
+                    run_id, WorkflowState.RUNNING_INDEPENDENT_REVIEW, test_err
+                )
+
+        integrity_check = verify_candidate_evidence_integrity(run)
+        if not integrity_check.valid:
+            err = AgentError(
+                code=integrity_check.primary_code or "CANDIDATE_INTEGRITY_FAILED",
+                message=(
+                    "Final candidate verification evidence integrity check failed before "
+                    "independent review: " + "; ".join(integrity_check.violations)
+                ),
+                details={"violations": list(integrity_check.violations)},
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="IntegrityVerifier",
+                stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+                status=AgentExecutionStatus.FAILED,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(
+                run_id, WorkflowState.RUNNING_INDEPENDENT_REVIEW, err
+            )
+
+        # Build traceability snapshot for the frozen candidate
+        cb = run.codebase_analysis
+        gen = run.test_generation
+        changed_files = cb.changed_files_repo_relative if cb else []
+        impacted_modules = cb.impacted_modules_repo_relative if cb else []
+        proposed_ids = [sc.scenario_id for sc in gen.scenarios] if gen else []
+        approved_ids = (
+            list(run.test_review.selected_test_ids)
+            if run.test_review and run.test_review.approved
+            else []
+        )
+        executed_ids = list(verification.executed_test_ids)
+        unapproved_ids = [
+            sc_id for sc_id in proposed_ids if sc_id not in set(approved_ids)
+        ]
+
+        criterion_traceability, traceability_meta, _unverified = (
+            self._build_criterion_traceability(
+                run,
+                verification,
+                changed_files=changed_files,
+                impacted_modules=impacted_modules,
+                proposed_ids=proposed_ids,
+                approved_ids=approved_ids,
+                executed_ids=executed_ids,
+                unapproved_ids=unapproved_ids,
+            )
+        )
+        comparison = run.baseline_comparison or verification.baseline_comparison
+        review_request = self._build_independent_review_request(
+            run=run,
+            verification=verification,
+            criterion_traceability=criterion_traceability,
+            existing_limitations=list(comparison.evidence_limitations),
+        )
+
+        if self._before_independent_review_hook is not None:
+            self._before_independent_review_hook(run)
+
+        # 2. Invoke injectable A6 IndependentReviewAdapter
+        rev_started = utc_now()
+        rev_t0 = time.perf_counter()
+        self._log(
+            run_id=run_id,
+            agent_name="IndependentReviewAdapter",
+            stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"mode={run.execution_mode.value}, workflow={run.workflow_mode.value}, "
+                f"candidate_patch={review_request.candidate_patch_sha256[:12] if review_request.candidate_patch_sha256 else 'working_tree'}, "
+                f"criteria={len(review_request.acceptance_criteria)}, "
+                f"relevant_files={len(review_request.relevant_source_file_paths)}"
+            ),
+            output_summary="Invoked injectable A6 IndependentReviewAdapter.review.",
+        )
+        try:
+            review_result = self.review_adapter.review(review_request)
+        except Exception as exc:  # noqa: BLE001
+            err = AgentError(
+                code="A6_UNEXPECTED_ERROR",
+                message=redact_secrets(
+                    f"IndependentReviewAdapter raised an unexpected exception: {exc}"
+                ),
+            )
+            review_result = IndependentReviewResult(
+                status="error",
+                availability=ReviewAvailabilityStatus.FAILED,
+                recommendation=None,
+                reviewed_run_id=run_id,
+                reviewed_candidate_proposal_id=review_request.candidate_proposal_id,
+                reviewed_candidate_patch_sha256=review_request.candidate_patch_sha256,
+                reviewed_baseline_snapshot_sha256=review_request.baseline_source_snapshot_sha256,
+                reviewed_modified_snapshot_sha256=review_request.modified_source_snapshot_sha256,
+                summary=err.message,
+                model_metadata=ReviewModelMetadata(
+                    model_label="provider_error",
+                    execution_mode=run.execution_mode.value,
+                    is_deterministic_fixture=False,
+                    is_mock_output=False,
+                ),
+                is_deterministic_fixture=False,
+                is_mock_output=False,
+                error=err,
+            )
+
+        rev_dur_ms = int((time.perf_counter() - rev_t0) * 1000)
+        rev_exec_status = (
+            AgentExecutionStatus.SUCCEEDED
+            if review_result.status == "completed"
+            else (
+                AgentExecutionStatus.SKIPPED
+                if review_result.status == "unavailable"
+                else AgentExecutionStatus.FAILED
+            )
+        )
+        rev_summary = (
+            f"Independent review status={review_result.status}, "
+            f"availability={review_result.availability.value}, "
+            f"recommendation={review_result.recommendation.value if review_result.recommendation else 'none'}, "
+            f"findings={len(review_result.findings)}, "
+            f"fixture={review_result.is_deterministic_fixture}, "
+            f"model={review_result.model_metadata.model_label}."
+        )
+        rev_rec = AgentExecutionRecord(
+            agent_name="IndependentReviewAdapter",
+            stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW.value,
+            status=rev_exec_status,
+            started_at=rev_started,
+            completed_at=utc_now(),
+            duration_ms=rev_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=rev_summary,
+            error=review_result.error,
+            assumptions=list(review_result.notes),
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="IndependentReviewAdapter",
+            stage=WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+            status=rev_exec_status,
+            duration_ms=rev_dur_ms,
+            input_summary=f"mode={run.execution_mode.value}, candidate={review_request.candidate_proposal_id or 'working_tree'}",
+            output_summary=rev_summary,
+            error=review_result.error,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.RUNNING_INDEPENDENT_REVIEW,
+            WorkflowState.RECONCILING_REVIEW_EVIDENCE,
+            updater=lambda current: current.model_copy(
+                update={
+                    "independent_review_request": review_request,
+                    "independent_review": review_result,
+                    "agent_records": [*current.agent_records, rev_rec],
+                }
+            ),
+            reason=(
+                f"Independent review stage finished ({review_result.availability.value}); "
+                "reconciling reviewer findings with deterministic verification evidence."
+            ),
+        )
+
+        # 3. Deterministic Evidence Reconciliation
+        rec_started = utc_now()
+        rec_t0 = time.perf_counter()
+        try:
+            reconciliation, reconciled_review = EvidenceReconciliationEngine.reconcile(
+                run=run,
+                verification=verification,
+                comparison=comparison,
+                criterion_traceability=criterion_traceability,
+                traceability_meta=traceability_meta,
+                review_request=review_request,
+                review_result=review_result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            rec_dur_ms = int((time.perf_counter() - rec_t0) * 1000)
+            err = AgentError(
+                code="EVIDENCE_RECONCILIATION_ERROR",
+                message=f"Evidence reconciliation engine failed unexpectedly: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="EvidenceReconciliationEngine",
+                stage=WorkflowState.RECONCILING_REVIEW_EVIDENCE,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=rec_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(
+                run_id, WorkflowState.RECONCILING_REVIEW_EVIDENCE, err
+            )
+
+        rec_dur_ms = int((time.perf_counter() - rec_t0) * 1000)
+        rec_summary = (
+            f"Reconciliation status={reconciliation.reconciliation_status}, "
+            f"assurance={reconciliation.assurance_classification}, "
+            f"blocks_ordinary_approval={reconciliation.blocks_ordinary_approval}, "
+            f"complete_requirement_assurance={reconciliation.complete_requirement_assurance}, "
+            f"material_disagreements={len(reconciliation.material_disagreements)}."
+        )
+        recon_agent_rec = AgentExecutionRecord(
+            agent_name="EvidenceReconciliationEngine",
+            stage=WorkflowState.RECONCILING_REVIEW_EVIDENCE.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=rec_started,
+            completed_at=utc_now(),
+            duration_ms=rec_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=rec_summary,
+            assumptions=list(reconciliation.approval_restrictions),
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="EvidenceReconciliationEngine",
+            stage=WorkflowState.RECONCILING_REVIEW_EVIDENCE,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=rec_dur_ms,
+            input_summary=(
+                f"verification_passed={reconciliation.deterministic_verification_passed}, "
+                f"review_availability={reconciliation.review_availability.value}"
+            ),
+            output_summary=rec_summary,
+        )
+
+        return self.transition_state(
+            run_id,
+            WorkflowState.RECONCILING_REVIEW_EVIDENCE,
+            WorkflowState.COMPILING_REPORT,
+            updater=lambda current: current.model_copy(
+                update={
+                    "independent_review": reconciled_review or review_result,
+                    "review_reconciliation": reconciliation,
+                    "agent_records": [*current.agent_records, recon_agent_rec],
+                }
+            ),
+            reason=(
+                f"Evidence reconciliation completed ({reconciliation.assurance_classification}); "
+                "compiling auditable change package report."
+            ),
         )
 
     def _build_criterion_traceability(
@@ -5845,7 +6541,50 @@ class OrchestratorService:
         )
         comparison = verification.baseline_comparison
         has_confirmed_regression = comparison.summary.blocks_ordinary_approval
-        complete_assurance = bool(traceability.get("requirement_verification_proven", False))
+        reconciliation = run.review_reconciliation
+        independent_review = run.independent_review
+
+        # Principle 9: complete_requirement_assurance requires BOTH deterministic traceability
+        # AND live completed independent review reconciliation alignment.
+        if reconciliation is not None:
+            complete_assurance = bool(
+                reconciliation.complete_requirement_assurance
+                and traceability.get("requirement_verification_proven", False)
+            )
+            traceability["complete_requirement_assurance"] = complete_assurance
+            traceability["requirement_verification_proven"] = complete_assurance
+            traceability["independent_review_availability"] = (
+                reconciliation.review_availability.value
+            )
+            traceability["independent_review_recommendation"] = (
+                reconciliation.reviewer_recommendation.value
+                if reconciliation.reviewer_recommendation is not None
+                else None
+            )
+            traceability["reconciliation_status"] = reconciliation.reconciliation_status
+            traceability["assurance_classification"] = (
+                reconciliation.assurance_classification
+            )
+        else:
+            # No independent review reconciliation was executed -> complete assurance MUST be False.
+            complete_assurance = False
+            traceability["complete_requirement_assurance"] = False
+            traceability["requirement_verification_proven"] = False
+            traceability["independent_review_availability"] = (
+                ReviewAvailabilityStatus.UNAVAILABLE.value
+            )
+            traceability["independent_review_recommendation"] = None
+            traceability["reconciliation_status"] = "unavailable"
+            traceability["assurance_classification"] = "reviewer_unavailable"
+
+        policy_decision = evaluate_approval_policy(run)
+        approval_restrictions = list(policy_decision.restrictions)
+        material_disagreements = (
+            list(reconciliation.material_disagreements)
+            if reconciliation is not None
+            else []
+        )
+
         outcome = verification.verification_outcome
 
         if run.repair_termination_reason in {
@@ -5868,9 +6607,17 @@ class OrchestratorService:
                 if run.repair_termination_reason is not None
                 else ""
             )
+            review_conflict_clause = (
+                " Independent reviewer support was overridden because deterministic baseline "
+                "regression evidence takes precedence."
+                if reconciliation is not None
+                and reconciliation.reviewer_recommendation
+                == ReviewRecommendation.SUPPORT
+                else ""
+            )
             recommendation_summary = (
                 "Confirmed newly introduced regression(s) detected against baseline "
-                f"({', '.join(comparison.summary.newly_introduced_failures)}).{repair_clause} "
+                f"({', '.join(comparison.summary.newly_introduced_failures)}).{repair_clause}{review_conflict_clause} "
                 "Ordinary approval is blocked; inspect baseline-vs-modified comparison, attempt history, and failure diagnostics."
             )
         elif verification.verification_passed and outcome == VerificationOutcome.PASSED:
@@ -5881,6 +6628,34 @@ class OrchestratorService:
                     "Approved generated tests passed against the modified working copy, "
                     "but mandatory unresolved requirement ambiguities remain open. "
                     "Ordinary approval is blocked until ambiguities are clarified."
+                )
+            elif (
+                reconciliation is not None
+                and reconciliation.assurance_classification == "reviewer_disagreement"
+            ):
+                recommendation_label = "additional_review_required"
+                recommendation_summary = (
+                    "Approved tests passed against the modified working copy, but independent "
+                    "review (A6) raised material concern(s) or recommended rejection "
+                    f"({len(material_disagreements)} material disagreement(s)). "
+                    "Ordinary approval is blocked; inspect review findings and submit 'needs_review' or 'reject'."
+                )
+            elif (
+                reconciliation is not None
+                and reconciliation.reviewer_recommendation
+                == ReviewRecommendation.NEEDS_REVIEW
+            ):
+                recommendation_label = "additional_review_required"
+                recommendation_summary = (
+                    "Approved tests passed against the modified working copy, but independent "
+                    "review (A6) recommended 'needs_review' due to remaining uncertainty. "
+                    "Additional human inspection is required."
+                )
+            elif not policy_decision.ordinary_approval_allowed:
+                recommendation_label = "additional_review_required"
+                recommendation_summary = (
+                    policy_decision.blocking_message
+                    or "Ordinary approval is restricted by reconciliation policy; additional review is required."
                 )
             else:
                 recommendation_label = "ready_for_human_review"
@@ -5908,6 +6683,30 @@ class OrchestratorService:
                         "complete regression safety is not established."
                     )
                 )
+                review_clause = ""
+                if reconciliation is not None:
+                    if (
+                        reconciliation.review_availability
+                        == ReviewAvailabilityStatus.COMPLETED_OFFLINE_FIXTURE
+                    ):
+                        review_clause = (
+                            " Independent review support came from a deterministic offline fixture "
+                            "(is_deterministic_fixture=True), NOT live independent AI verification."
+                        )
+                    elif (
+                        reconciliation.review_availability
+                        == ReviewAvailabilityStatus.COMPLETED
+                    ):
+                        review_clause = (
+                            " Live independent review (A6) supported the verified candidate."
+                        )
+                    elif (
+                        reconciliation.review_availability
+                        == ReviewAvailabilityStatus.UNAVAILABLE
+                    ):
+                        review_clause = (
+                            " Independent review (A6) is unavailable; evidence package is incomplete."
+                        )
                 assurance_clause = (
                     " Ordinary human approval records review of this evidence package but does not "
                     "constitute complete requirement assurance."
@@ -5918,13 +6717,21 @@ class OrchestratorService:
                     "All approved generated tests passed against the modified working copy. "
                     "Ready for human review; passing generated tests alone is not proof of "
                     f"full requirement verification, regression safety, or production readiness."
-                    f"{repair_clause}{comparison_clause}{assurance_clause}{mock_clause}"
+                    f"{repair_clause}{comparison_clause}{review_clause}{assurance_clause}{mock_clause}"
                 )
         elif outcome == VerificationOutcome.FAILED_TESTS:
             recommendation = "reject"
             recommendation_label = "verification_failed"
+            review_conflict_clause = (
+                " Independent reviewer support was overridden because deterministic test failures "
+                "cannot be overridden by AI opinion."
+                if reconciliation is not None
+                and reconciliation.reviewer_recommendation
+                == ReviewRecommendation.SUPPORT
+                else ""
+            )
             recommendation_summary = (
-                f"Verification failed: {verification.failed or len(verification.failures)} test(s) failed. "
+                f"Verification failed: {verification.failed or len(verification.failures)} test(s) failed.{review_conflict_clause} "
                 "Inspect failure diagnostics before considering any change acceptance."
             )
         elif outcome in {
@@ -5967,9 +6774,6 @@ class OrchestratorService:
             limitations.append(
                 "Pre-change M01 codebase context was limited to static AST indexing; full reverse-dependency impact analysis ran post-patch."
             )
-            limitations.append(
-                "Independent adversarial review (A6) and code coverage measurement are not executed in this M02 MVP."
-            )
             if run.repair_history is not None:
                 if run.repair_history.termination_reason == RepairTerminationReason.PROVIDER_UNAVAILABLE:
                     limitations.append(
@@ -5994,7 +6798,21 @@ class OrchestratorService:
                 )
         else:
             limitations.append(
-                "Automated patch generation (A4) was not executed in verify_existing_change mode; independent adversarial review (A6) and code coverage measurement are not executed in this M02 MVP."
+                "Automated patch generation (A4) was not executed in verify_existing_change mode."
+            )
+        if independent_review is None or independent_review.availability == ReviewAvailabilityStatus.UNAVAILABLE:
+            limitations.append(
+                "Independent adversarial review (A6) is unavailable (no production A6 provider configured); evidence package is incomplete."
+            )
+        elif independent_review.availability == ReviewAvailabilityStatus.COMPLETED_OFFLINE_FIXTURE or independent_review.is_deterministic_fixture:
+            limitations.append(
+                f"Independent review (A6) used an offline deterministic fixture ('{independent_review.model_metadata.model_label}', "
+                "is_deterministic_fixture=True), NOT live independent AI review evidence."
+            )
+        elif independent_review.availability == ReviewAvailabilityStatus.FAILED:
+            err_code = independent_review.error.code if independent_review.error else "REVIEW_FAILED"
+            limitations.append(
+                f"Independent review (A6) failed or was rejected ({err_code}); invalid/stale review output is not counted as valid assurance evidence."
             )
         if req_analysis is None:
             limitations.append(
@@ -6125,6 +6943,38 @@ class OrchestratorService:
             baseline_verification=run.baseline_verification,
             modified_verification=run.modified_verification,
             baseline_comparison=comparison,
+            independent_review=independent_review,
+            review_reconciliation=reconciliation,
+            review_availability=(
+                reconciliation.review_availability
+                if reconciliation is not None
+                else (
+                    independent_review.availability
+                    if independent_review is not None
+                    else ReviewAvailabilityStatus.UNAVAILABLE
+                )
+            ),
+            reviewer_recommendation=(
+                reconciliation.reviewer_recommendation
+                if reconciliation is not None
+                else (
+                    independent_review.recommendation
+                    if independent_review is not None
+                    else None
+                )
+            ),
+            material_disagreements=material_disagreements,
+            approval_restrictions=approval_restrictions,
+            reviewed_candidate_proposal_id=(
+                independent_review.reviewed_candidate_proposal_id
+                if independent_review is not None
+                else None
+            ),
+            reviewed_candidate_patch_sha256=(
+                independent_review.reviewed_candidate_patch_sha256
+                if independent_review is not None
+                else None
+            ),
             risk_summary=verification.risk_summary if verification else RiskSummary(),
             complete_requirement_assurance=complete_assurance,
             recommendation=recommendation,
@@ -6164,97 +7014,13 @@ class OrchestratorService:
             )
 
         if request.decision == HumanDecision.APPROVE:
-            active_comparison = (
-                run.baseline_comparison
-                or (run.verification.baseline_comparison if run.verification is not None else None)
-            )
-            if run.verification is None or not run.verification.verification_passed:
-                outcome_val = (
-                    run.verification.verification_outcome.value
-                    if run.verification is not None
-                    else "missing"
-                )
-                details: dict[str, Any] = {"verification_outcome": outcome_val}
-                reg_clause = ""
-                if (
-                    active_comparison is not None
-                    and active_comparison.summary.has_confirmed_regression
-                ):
-                    details["has_confirmed_regression"] = True
-                    details["newly_introduced_failures"] = list(
-                        active_comparison.summary.newly_introduced_failures
-                    )
-                    reg_clause = (
-                        " Confirmed newly introduced regression(s): "
-                        + ", ".join(active_comparison.summary.newly_introduced_failures)
-                        + "."
-                    )
+            policy_decision = evaluate_approval_policy(run)
+            if not policy_decision.ordinary_approval_allowed:
                 raise ReviewConflictError(
-                    "Cannot approve a change package when mandatory verification did not pass "
-                    f"(verification_outcome='{outcome_val}').{reg_clause} "
-                    "Submit 'needs_review' or 'reject' instead.",
-                    code="VERIFICATION_APPROVAL_BLOCKED",
-                    details=details,
-                    run_id=run_id,
-                )
-            if (
-                active_comparison is not None
-                and active_comparison.summary.blocks_ordinary_approval
-            ):
-                raise ReviewConflictError(
-                    "Cannot approve a change package when baseline-versus-modified comparison "
-                    "confirmed newly introduced mandatory regression(s) "
-                    f"({', '.join(active_comparison.summary.newly_introduced_failures)}). "
-                    "Submit 'needs_review' or 'reject' instead.",
-                    code="REGRESSION_APPROVAL_BLOCKED",
-                    details={
-                        "newly_introduced_failures": list(
-                            active_comparison.summary.newly_introduced_failures
-                        ),
-                        "comparison_status": active_comparison.status.value,
-                    },
-                    run_id=run_id,
-                )
-            if run.repair_termination_reason in {
-                RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
-                RepairTerminationReason.TEST_MODIFICATION_REJECTED,
-            }:
-                raise ReviewConflictError(
-                    "Cannot approve a change package after bounded repair terminated due to "
-                    f"'{run.repair_termination_reason.value}'. Submit 'needs_review' or 'reject' "
-                    "and perform fresh test review instead.",
-                    code="REPAIR_REVIEW_REQUIRED",
-                    details={
-                        "repair_termination_reason": run.repair_termination_reason.value
-                    },
-                    run_id=run_id,
-                )
-            if (
-                run.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE
-                and (run.patch_application is None or not run.patch_application.applied)
-            ):
-                raise ReviewConflictError(
-                    "Cannot approve a generate_and_verify_change run without confirmed "
-                    "isolated-workspace patch application evidence.",
-                    code="PATCH_APPLICATION_REQUIRED",
-                    run_id=run_id,
-                )
-            if (
-                run.requirement_analysis is not None
-                and run.requirement_analysis.has_mandatory_unresolved_ambiguities
-            ):
-                blocking_ids = [
-                    amb.ambiguity_id
-                    for amb in run.requirement_analysis.ambiguities
-                    if (amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING)
-                    and not amb.resolved
-                ]
-                raise ReviewConflictError(
-                    "Cannot approve a change package while mandatory unresolved requirement "
-                    f"ambiguities remain open ({', '.join(blocking_ids)}). "
-                    "Submit 'needs_review' or 'reject' instead.",
-                    code="UNRESOLVED_REQUIREMENT_AMBIGUITY",
-                    details={"unresolved_ambiguity_ids": blocking_ids},
+                    policy_decision.blocking_message
+                    or "Ordinary approval is blocked by workflow verification and reconciliation policy.",
+                    code=policy_decision.blocking_code or "APPROVAL_BLOCKED",
+                    details=policy_decision.blocking_details,
                     run_id=run_id,
                 )
 

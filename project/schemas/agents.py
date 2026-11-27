@@ -30,6 +30,12 @@ from .repair import (
     RepairTerminationReason,
 )
 from .requirements import RequirementAnalysisResult, RequirementTraceability
+from .review import (
+    EvidenceReconciliationResult,
+    IndependentReviewResult,
+    ReviewAvailabilityStatus,
+    ReviewRecommendation,
+)
 from .verification import (
     BaselineComparisonEvidence,
     BaselineVerificationResult,
@@ -338,6 +344,16 @@ class ChangePackageReport(BaseModel):
     baseline_verification: BaselineVerificationResult | None = None
     modified_verification: ModifiedVerificationResult | None = None
     baseline_comparison: BaselineComparisonEvidence | None = None
+    independent_review: IndependentReviewResult | None = None
+    review_reconciliation: EvidenceReconciliationResult | None = None
+    review_availability: ReviewAvailabilityStatus | None = None
+    reviewer_recommendation: ReviewRecommendation | None = None
+    material_disagreements: list[str] = Field(default_factory=list)
+    approval_restrictions: list[str] = Field(default_factory=list)
+    reviewed_candidate_proposal_id: str | None = None
+    reviewed_candidate_patch_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     risk_summary: RiskSummary = Field(default_factory=RiskSummary)
     complete_requirement_assurance: bool = False
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"] = (

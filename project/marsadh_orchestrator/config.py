@@ -47,6 +47,7 @@ class OrchestratorConfig(BaseModel):
     groq_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     auto_repair_enabled: bool = True
     max_repair_attempts: int = Field(default=2, ge=0, le=2)
+    require_independent_review: bool = False
     max_patch_size_bytes: int = Field(default=100_000, ge=1024, le=1_000_000)
     max_patch_changed_files: int = Field(default=10, ge=1, le=50)
     max_concurrent_runs: int = Field(default=4, ge=1, le=32)
@@ -240,6 +241,17 @@ class OrchestratorConfig(BaseModel):
             kwargs["max_repair_attempts"] = int(
                 source["CHANGEGUARD_MAX_REPAIR_ATTEMPTS"]
             )
+        if source.get("CHANGEGUARD_REQUIRE_INDEPENDENT_REVIEW") is not None:
+            raw_rev = source["CHANGEGUARD_REQUIRE_INDEPENDENT_REVIEW"].strip().lower()
+            if raw_rev in {"1", "true", "yes", "on"}:
+                kwargs["require_independent_review"] = True
+            elif raw_rev in {"0", "false", "no", "off"}:
+                kwargs["require_independent_review"] = False
+            else:
+                raise ValueError(
+                    "Invalid CHANGEGUARD_REQUIRE_INDEPENDENT_REVIEW value: "
+                    f"'{source['CHANGEGUARD_REQUIRE_INDEPENDENT_REVIEW']}'"
+                )
         if source.get("CHANGEGUARD_MAX_PATCH_SIZE_BYTES"):
             kwargs["max_patch_size_bytes"] = int(
                 source["CHANGEGUARD_MAX_PATCH_SIZE_BYTES"]

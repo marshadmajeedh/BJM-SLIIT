@@ -15,11 +15,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from project.marsadh_orchestrator.review_reconciliation import (
+    evaluate_approval_policy,
+)
 from project.marsadh_orchestrator.store import (
     _sanitize_baseline_comparison,
     _sanitize_baseline_verification,
+    _sanitize_independent_review,
     _sanitize_modified_verification,
     _sanitize_repair_eligibility,
+    _sanitize_review_reconciliation,
     redact_nested_secrets,
     redact_secrets,
 )
@@ -34,10 +39,12 @@ from project.schemas import (
     ChangedFileImpact,
     ChangePackageReport,
     CodebaseAnalysisResult,
+    EvidenceReconciliationResult,
     ExecutionMode,
     FailureDiagnostic,
     GeneratedTestScenario,
     HumanDecisionRecord,
+    IndependentReviewResult,
     ModifiedVerificationResult,
     PatchApplicationResult,
     PatchAttemptOutcome,
@@ -57,6 +64,11 @@ from project.schemas import (
     RequirementAnalysisResult,
     RequirementAssumption,
     RequirementTraceability,
+    ReviewAvailabilityStatus,
+    ReviewEvidenceReference,
+    ReviewFinding,
+    ReviewModelMetadata,
+    ReviewRecommendation,
     RiskSummary,
     TestGenerationResult,
     TestReviewRecord,
@@ -93,6 +105,8 @@ class HealthResponse(BaseModel):
     live_llm_configured: bool
     groq_model: str | None = None
     patch_generator_configured: bool = False
+    independent_reviewer_configured: bool = False
+    require_independent_review: bool = False
     auto_repair_enabled: bool = True
     max_repair_attempts: int = 2
     supported_workflow_modes: list[str] = Field(
@@ -377,6 +391,75 @@ class VerificationResponse(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
+class IndependentReviewResponse(BaseModel):
+    """Sanitized A6 independent review view without host paths or unredacted secrets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "unavailable", "invalid", "error"]
+    availability: ReviewAvailabilityStatus
+    recommendation: ReviewRecommendation | None = None
+    reviewed_run_id: str
+    reviewed_candidate_proposal_id: str | None = None
+    reviewed_candidate_patch_sha256: str | None = None
+    reviewed_baseline_snapshot_sha256: str | None = None
+    reviewed_modified_snapshot_sha256: str | None = None
+    summary: str = ""
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    requirement_compliance_concerns: list[str] = Field(default_factory=list)
+    potential_behavioral_regressions: list[str] = Field(default_factory=list)
+    security_and_maintainability_concerns: list[str] = Field(default_factory=list)
+    missing_verification_evidence: list[str] = Field(default_factory=list)
+    unsupported_assumptions: list[str] = Field(default_factory=list)
+    evidence_references: list[ReviewEvidenceReference] = Field(default_factory=list)
+    model_metadata: ReviewModelMetadata
+    is_deterministic_fixture: bool = False
+    is_mock_output: bool = False
+    reviewed_at: datetime
+    error: AgentError | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class EvidenceReconciliationResponse(BaseModel):
+    """Sanitized deterministic evidence reconciliation and approval-restriction view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reconciliation_status: Literal[
+        "reconciled_aligned",
+        "reconciled_with_disagreement",
+        "reconciled_reviewer_unavailable",
+        "reconciled_reviewer_invalid_or_stale",
+        "reconciled_deterministic_block",
+    ]
+    assurance_classification: Literal[
+        "fully_supported_requirement_assurance",
+        "reviewer_supported_verification",
+        "incomplete_evidence_package",
+        "reviewer_disagreement",
+        "reviewer_unavailable",
+        "deterministic_verification_blocked",
+    ]
+    deterministic_verification_passed: bool
+    has_confirmed_regression: bool = False
+    has_blocking_ambiguity: bool = False
+    candidate_integrity_verified: bool = True
+    review_candidate_identity_verified: bool = False
+    review_availability: ReviewAvailabilityStatus = ReviewAvailabilityStatus.UNAVAILABLE
+    reviewer_recommendation: ReviewRecommendation | None = None
+    reviewer_is_deterministic_fixture: bool = False
+    material_disagreements: list[str] = Field(default_factory=list)
+    unsubstantiated_claims: list[str] = Field(default_factory=list)
+    invalid_evidence_references: list[str] = Field(default_factory=list)
+    approval_restrictions: list[str] = Field(default_factory=list)
+    blocks_ordinary_approval: bool = False
+    blocking_error_code: str | None = None
+    complete_requirement_assurance: bool = False
+    evidence_package_complete: bool = False
+    reconciled_summary: str = ""
+    reconciled_at: datetime
+
+
 class ChangePackageResponse(BaseModel):
     """Safe auditable change package summary for the dashboard final-decision view."""
 
@@ -422,6 +505,14 @@ class ChangePackageResponse(BaseModel):
     baseline_verification: BaselineVerificationResult | None = None
     modified_verification: ModifiedVerificationResult | None = None
     baseline_comparison: BaselineComparisonEvidence | None = None
+    independent_review: IndependentReviewResponse | None = None
+    review_reconciliation: EvidenceReconciliationResponse | None = None
+    review_availability: ReviewAvailabilityStatus | None = None
+    reviewer_recommendation: ReviewRecommendation | None = None
+    material_disagreements: list[str] = Field(default_factory=list)
+    approval_restrictions: list[str] = Field(default_factory=list)
+    reviewed_candidate_proposal_id: str | None = None
+    reviewed_candidate_patch_sha256: str | None = None
     risk_summary: RiskSummary = Field(default_factory=RiskSummary)
     complete_requirement_assurance: bool = False
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"]
@@ -467,6 +558,10 @@ class RunSummaryResponse(BaseModel):
     verification_passed: bool | None = None
     baseline_comparison_status: VerificationComparisonStatus | None = None
     has_confirmed_regression: bool = False
+    review_availability: ReviewAvailabilityStatus | None = None
+    reviewer_recommendation: ReviewRecommendation | None = None
+    has_material_review_disagreement: bool = False
+    complete_requirement_assurance: bool = False
     has_error: bool = False
 
 
@@ -511,6 +606,14 @@ class RunDetailResponse(BaseModel):
     final_candidate_proposal_id: str | None = None
     final_candidate_patch_sha256: str | None = None
     final_verification_outcome: VerificationOutcome | None = None
+    require_independent_review: bool = False
+    review_availability: ReviewAvailabilityStatus | None = None
+    reviewer_recommendation: ReviewRecommendation | None = None
+    material_disagreements: list[str] = Field(default_factory=list)
+    approval_restrictions: list[str] = Field(default_factory=list)
+    reviewed_candidate_proposal_id: str | None = None
+    reviewed_candidate_patch_sha256: str | None = None
+    complete_requirement_assurance: bool = False
     created_at: datetime
     updated_at: datetime
     allowed_actions: list[str] = Field(default_factory=list)
@@ -527,6 +630,8 @@ class RunDetailResponse(BaseModel):
     modified_verification: ModifiedVerificationResult | None = None
     baseline_comparison: BaselineComparisonEvidence | None = None
     verification: VerificationResponse | None = None
+    independent_review: IndependentReviewResponse | None = None
+    review_reconciliation: EvidenceReconciliationResponse | None = None
     report: ChangePackageResponse | None = None
     final_decision: HumanDecisionRecord | None = None
     error: AgentError | None = None
@@ -558,34 +663,8 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
     if run.state == WorkflowState.AWAITING_TEST_REVIEW:
         return ["submit_test_review"]
     if run.state == WorkflowState.AWAITING_FINAL_APPROVAL:
-        has_blocking_ambiguity = bool(
-            run.requirement_analysis is not None
-            and run.requirement_analysis.has_mandatory_unresolved_ambiguities
-        )
-        patch_ready = (
-            run.workflow_mode != WorkflowMode.GENERATE_AND_VERIFY_CHANGE
-            or (run.patch_application is not None and run.patch_application.applied)
-        )
-        active_comparison = (
-            run.baseline_comparison
-            or (run.verification.baseline_comparison if run.verification is not None else None)
-        )
-        has_confirmed_regression = bool(
-            active_comparison is not None
-            and active_comparison.summary.blocks_ordinary_approval
-        )
-        repair_blocked = run.repair_termination_reason in {
-            RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
-            RepairTerminationReason.TEST_MODIFICATION_REJECTED,
-        }
-        if (
-            run.verification is not None
-            and run.verification.verification_passed
-            and not has_blocking_ambiguity
-            and not has_confirmed_regression
-            and not repair_blocked
-            and patch_ready
-        ):
+        policy_decision = evaluate_approval_policy(run)
+        if policy_decision.ordinary_approval_allowed:
             return [
                 "submit_final_decision:approve",
                 "submit_final_decision:reject",
@@ -892,8 +971,128 @@ def _to_verification_response(
     )
 
 
+def _redact_host_paths_str(text: str, host_paths: tuple[str | None, ...]) -> str:
+    sanitized = redact_secrets(text)
+    for host_path in host_paths:
+        if host_path:
+            sanitized = sanitized.replace(host_path, "[host path redacted]")
+    return sanitized
+
+
+def _to_independent_review_response(
+    review: IndependentReviewResult | None,
+    *,
+    host_paths: tuple[str | None, ...] = (),
+) -> IndependentReviewResponse | None:
+    if review is None:
+        return None
+    sanitized = _sanitize_independent_review(review)
+    if sanitized is None:
+        return None
+    return IndependentReviewResponse(
+        status=sanitized.status,
+        availability=sanitized.availability,
+        recommendation=sanitized.recommendation,
+        reviewed_run_id=sanitized.reviewed_run_id,
+        reviewed_candidate_proposal_id=sanitized.reviewed_candidate_proposal_id,
+        reviewed_candidate_patch_sha256=sanitized.reviewed_candidate_patch_sha256,
+        reviewed_baseline_snapshot_sha256=sanitized.reviewed_baseline_snapshot_sha256,
+        reviewed_modified_snapshot_sha256=sanitized.reviewed_modified_snapshot_sha256,
+        summary=_redact_host_paths_str(sanitized.summary, host_paths),
+        findings=[
+            f.model_copy(
+                update={
+                    "title": _redact_host_paths_str(f.title, host_paths),
+                    "description": _redact_host_paths_str(f.description, host_paths),
+                    "reconciliation_note": _redact_host_paths_str(
+                        f.reconciliation_note, host_paths
+                    ),
+                }
+            )
+            for f in sanitized.findings
+        ],
+        requirement_compliance_concerns=[
+            _redact_host_paths_str(c, host_paths)
+            for c in sanitized.requirement_compliance_concerns
+        ],
+        potential_behavioral_regressions=[
+            _redact_host_paths_str(c, host_paths)
+            for c in sanitized.potential_behavioral_regressions
+        ],
+        security_and_maintainability_concerns=[
+            _redact_host_paths_str(c, host_paths)
+            for c in sanitized.security_and_maintainability_concerns
+        ],
+        missing_verification_evidence=[
+            _redact_host_paths_str(c, host_paths)
+            for c in sanitized.missing_verification_evidence
+        ],
+        unsupported_assumptions=[
+            _redact_host_paths_str(c, host_paths)
+            for c in sanitized.unsupported_assumptions
+        ],
+        evidence_references=list(sanitized.evidence_references),
+        model_metadata=sanitized.model_metadata,
+        is_deterministic_fixture=sanitized.is_deterministic_fixture,
+        is_mock_output=sanitized.is_mock_output,
+        reviewed_at=sanitized.reviewed_at,
+        error=_sanitize_error(sanitized.error),
+        notes=[_redact_host_paths_str(n, host_paths) for n in sanitized.notes],
+    )
+
+
+def _to_reconciliation_response(
+    recon: EvidenceReconciliationResult | None,
+    *,
+    host_paths: tuple[str | None, ...] = (),
+) -> EvidenceReconciliationResponse | None:
+    if recon is None:
+        return None
+    sanitized = _sanitize_review_reconciliation(recon)
+    if sanitized is None:
+        return None
+    return EvidenceReconciliationResponse(
+        reconciliation_status=sanitized.reconciliation_status,
+        assurance_classification=sanitized.assurance_classification,
+        deterministic_verification_passed=sanitized.deterministic_verification_passed,
+        has_confirmed_regression=sanitized.has_confirmed_regression,
+        has_blocking_ambiguity=sanitized.has_blocking_ambiguity,
+        candidate_integrity_verified=sanitized.candidate_integrity_verified,
+        review_candidate_identity_verified=sanitized.review_candidate_identity_verified,
+        review_availability=sanitized.review_availability,
+        reviewer_recommendation=sanitized.reviewer_recommendation,
+        reviewer_is_deterministic_fixture=sanitized.reviewer_is_deterministic_fixture,
+        material_disagreements=[
+            _redact_host_paths_str(item, host_paths)
+            for item in sanitized.material_disagreements
+        ],
+        unsubstantiated_claims=[
+            _redact_host_paths_str(item, host_paths)
+            for item in sanitized.unsubstantiated_claims
+        ],
+        invalid_evidence_references=[
+            _redact_host_paths_str(item, host_paths)
+            for item in sanitized.invalid_evidence_references
+        ],
+        approval_restrictions=[
+            _redact_host_paths_str(item, host_paths)
+            for item in sanitized.approval_restrictions
+        ],
+        blocks_ordinary_approval=sanitized.blocks_ordinary_approval,
+        blocking_error_code=sanitized.blocking_error_code,
+        complete_requirement_assurance=sanitized.complete_requirement_assurance,
+        evidence_package_complete=sanitized.evidence_package_complete,
+        reconciled_summary=_redact_host_paths_str(
+            sanitized.reconciled_summary, host_paths
+        ),
+        reconciled_at=sanitized.reconciled_at,
+    )
+
+
 def _to_report_response(
     report: ChangePackageReport | None,
+    *,
+    host_paths: tuple[str | None, ...] = (),
 ) -> ChangePackageResponse | None:
     if report is None:
         return None
@@ -944,6 +1143,24 @@ def _to_report_response(
             report.modified_verification
         ),
         baseline_comparison=_sanitize_baseline_comparison(report.baseline_comparison),
+        independent_review=_to_independent_review_response(
+            report.independent_review, host_paths=host_paths
+        ),
+        review_reconciliation=_to_reconciliation_response(
+            report.review_reconciliation, host_paths=host_paths
+        ),
+        review_availability=report.review_availability,
+        reviewer_recommendation=report.reviewer_recommendation,
+        material_disagreements=[
+            _redact_host_paths_str(item, host_paths)
+            for item in report.material_disagreements
+        ],
+        approval_restrictions=[
+            _redact_host_paths_str(item, host_paths)
+            for item in report.approval_restrictions
+        ],
+        reviewed_candidate_proposal_id=report.reviewed_candidate_proposal_id,
+        reviewed_candidate_patch_sha256=report.reviewed_candidate_patch_sha256,
         risk_summary=report.risk_summary,
         complete_requirement_assurance=report.complete_requirement_assurance,
         recommendation=report.recommendation,
@@ -1035,12 +1252,53 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
                 and run.verification.baseline_comparison.summary.has_confirmed_regression
             )
         ),
+        review_availability=(
+            run.review_reconciliation.review_availability
+            if run.review_reconciliation is not None
+            else (
+                run.independent_review.availability
+                if run.independent_review is not None
+                else None
+            )
+        ),
+        reviewer_recommendation=(
+            run.review_reconciliation.reviewer_recommendation
+            if run.review_reconciliation is not None
+            else (
+                run.independent_review.recommendation
+                if run.independent_review is not None
+                else None
+            )
+        ),
+        has_material_review_disagreement=bool(
+            run.review_reconciliation is not None
+            and (
+                bool(run.review_reconciliation.material_disagreements)
+                or run.review_reconciliation.assurance_classification
+                == "reviewer_disagreement"
+            )
+        ),
+        complete_requirement_assurance=bool(
+            run.report.complete_requirement_assurance
+            if run.report is not None
+            else (
+                run.review_reconciliation.complete_requirement_assurance
+                if run.review_reconciliation is not None
+                else False
+            )
+        ),
         has_error=run.error is not None,
     )
 
 
 def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
     """Convert internal WorkflowRunRecord to a safe dashboard-ready detail payload."""
+    host_paths = (
+        run.workspace_path,
+        run.baseline_workspace_path,
+        run.repository.repository_path,
+    )
+    policy_decision = evaluate_approval_policy(run)
     return RunDetailResponse(
         run_id=run.run_id,
         state=run.state,
@@ -1110,6 +1368,56 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
             if run.verification is not None
             else None
         ),
+        require_independent_review=run.require_independent_review,
+        review_availability=(
+            run.review_reconciliation.review_availability
+            if run.review_reconciliation is not None
+            else (
+                run.independent_review.availability
+                if run.independent_review is not None
+                else None
+            )
+        ),
+        reviewer_recommendation=(
+            run.review_reconciliation.reviewer_recommendation
+            if run.review_reconciliation is not None
+            else (
+                run.independent_review.recommendation
+                if run.independent_review is not None
+                else None
+            )
+        ),
+        material_disagreements=(
+            [
+                _redact_host_paths_str(item, host_paths)
+                for item in run.review_reconciliation.material_disagreements
+            ]
+            if run.review_reconciliation is not None
+            else []
+        ),
+        approval_restrictions=[
+            _redact_host_paths_str(item, host_paths)
+            for item in policy_decision.restrictions
+        ],
+        reviewed_candidate_proposal_id=(
+            run.independent_review.reviewed_candidate_proposal_id
+            if run.independent_review is not None
+            else None
+        ),
+        reviewed_candidate_patch_sha256=(
+            run.independent_review.reviewed_candidate_patch_sha256
+            if run.independent_review is not None
+            else None
+        ),
+        complete_requirement_assurance=bool(
+            run.report.complete_requirement_assurance
+            if run.report is not None
+            else (
+                run.review_reconciliation.complete_requirement_assurance
+                if run.review_reconciliation is not None
+                else False
+            )
+        ),
         created_at=run.created_at,
         updated_at=run.updated_at,
         allowed_actions=_allowed_actions(run),
@@ -1137,13 +1445,17 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         baseline_comparison=_sanitize_baseline_comparison(run.baseline_comparison),
         verification=_to_verification_response(
             run.verification,
-            host_paths=(
-                run.workspace_path,
-                run.baseline_workspace_path,
-                run.repository.repository_path,
-            ),
+            host_paths=host_paths,
         ),
-        report=_to_report_response(run.report),
+        independent_review=_to_independent_review_response(
+            run.independent_review,
+            host_paths=host_paths,
+        ),
+        review_reconciliation=_to_reconciliation_response(
+            run.review_reconciliation,
+            host_paths=host_paths,
+        ),
+        report=_to_report_response(run.report, host_paths=host_paths),
         final_decision=run.final_decision,
         error=_sanitize_error(run.error),
     )
