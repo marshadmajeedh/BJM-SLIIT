@@ -256,7 +256,11 @@ def test_full_workflow_through_both_gates_real_adapters_and_repo_unchanged(tmp_p
     assert reviewed.verification.passed == 1
     assert reviewed.verification.failed == 0
     assert reviewed.verification.executed_test_ids == ["SCN-002"]
-    assert reviewed.verification.coverage_status == "unavailable"
+    assert reviewed.verification.coverage_status == "measured"
+    assert reviewed.verification.coverage_percent == (
+        reviewed.verification.raw_result["coverage"]["coverage_percentage"]
+    )
+    assert 0 < reviewed.verification.coverage_percent <= 100
     assert reviewed.verification.baseline_comparison.status == "completed"
     assert reviewed.verification.baseline_comparison.summary.preserved_behavior_count == 1
     assert reviewed.verification.baseline_comparison.summary.newly_introduced_failure_count == 0

@@ -387,7 +387,10 @@ def test_real_http_end_to_end_scenario_a_correct_and_scenario_b_regressive(tmp_p
             )
             assert ver_a["baseline_comparison"]["status"] == "completed"
             assert ver_a["baseline_comparison"]["newly_failing_tests"] == []
+            # Per-test baseline comparison does not merge coverage databases.
+            # Do not present an individual run as aggregate suite coverage.
             assert ver_a["coverage_status"] == "unavailable"
+            assert ver_a["coverage_percent"] is None
 
             # Phase 5: Verify evidence integrity fields on Scenario A
             rep_a = gate2_a["report"]

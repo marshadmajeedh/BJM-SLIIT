@@ -1286,7 +1286,9 @@ def test_real_collection_error_and_baseline_timeout_and_unavailable_baseline_pre
 
     # 13b. Baseline timeout while modified passes -> preserves modified results & marks INCOMPLETE
     cfg_to = _make_config(
-        tmp_path, repos_root=repos_root, configured={"pos": repo}, db_name="to.sqlite3", timeout=1
+        # Baseline timeout is simulated by the adapter below. Give real modified
+        # pytest execution enough time for interpreter and coverage startup.
+        tmp_path, repos_root=repos_root, configured={"pos": repo}, db_name="to.sqlite3", timeout=30
     )
 
     class BaselineTimeoutOnlyAdapter(VerificationAdapter):

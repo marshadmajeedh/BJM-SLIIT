@@ -531,6 +531,31 @@ class VerificationAdapter:
             outcome = VerificationOutcome.PASSED
             verification_passed = True
 
+
+        coverage_percent = None
+        coverage_status = "unavailable"
+
+        coverage_data = raw_result.get("coverage")
+
+        if (
+            outcome in (
+                VerificationOutcome.PASSED,
+                VerificationOutcome.FAILED_TESTS,
+            )
+            and exit_code in (0, 1)
+            and isinstance(coverage_data, dict)
+            and coverage_data.get("status") == "success"
+        ):
+            percentage = coverage_data.get("coverage_percentage")
+
+            if (
+                type(percentage) in (int, float)
+                and 0 <= percentage <= 100
+            ):
+                coverage_percent = float(percentage)
+                coverage_status = "measured"
+
+
         error_obj: AgentError | None = None
         if outcome == VerificationOutcome.COLLECTION_ERROR:
             error_obj = AgentError(
@@ -562,8 +587,8 @@ class VerificationAdapter:
             collection_errors=collection_errors,
             failures=diagnostics,
             risk_summary=_compute_risk_summary(outcome, diagnostics),
-            coverage_percent=None,
-            coverage_status="unavailable",
+            coverage_percent=coverage_percent,
+            coverage_status=coverage_status,
             ai_root_cause_status="unavailable",
             baseline_comparison=BaselineComparisonEvidence(
                 status="unavailable",
@@ -577,6 +602,8 @@ class VerificationAdapter:
             error=error_obj,
             assumptions=[
                 "Running generated tests against the modified repository alone is not proof of regression safety.",
-                "Code coverage, AI root-cause analysis, and baseline-versus-modified comparison are not executed in M02 Foundation.",
+                "Code coverage measures executed statements, not software correctness.",
+                "AI root-cause analysis is not executed by this adapter.",
+                "Baseline comparison is handled separately by the orchestration workflow.",
             ],
         )
