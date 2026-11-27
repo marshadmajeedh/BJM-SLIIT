@@ -106,6 +106,8 @@ async def health_check(
         live_llm_configured=live_configured,
         groq_model=config.groq_model if live_configured else None,
         patch_generator_configured=patch_gen_configured,
+        auto_repair_enabled=config.auto_repair_enabled,
+        max_repair_attempts=config.max_repair_attempts,
         verification_dependencies_available=ver_deps_ok,
         git_available=git_ok,
         configured_repository_ids=sorted(config.configured_repositories.keys()),

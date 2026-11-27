@@ -38,17 +38,31 @@ from project.marsadh_orchestrator.adapters import (
 from project.marsadh_orchestrator.baseline_verification import (
     BaselineComparisonEngine,
     BaselineTestMirrorError,
+    discover_existing_regression_tests,
     execute_snapshot_verification,
     mirror_approved_tests_to_baseline,
+    mirror_approved_tests_to_workspace,
     resolve_scenario_test_purpose,
 )
 from project.marsadh_orchestrator.config import OrchestratorConfig
 from project.marsadh_orchestrator.patch_engine import PatchApplicator, PatchValidator
+from project.marsadh_orchestrator.repair_engine import (
+    RepairEligibilityEvaluator,
+    build_repair_request_evidence,
+    check_approved_test_assumptions_preserved,
+    compute_failure_signature,
+    is_provider_auth_or_rate_limit_error,
+)
 from project.marsadh_orchestrator.requirement_analyst import (
     DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     RequirementAnalystAgent,
 )
-from project.marsadh_orchestrator.store import RunStore, generate_run_id, utc_now
+from project.marsadh_orchestrator.store import (
+    RunStore,
+    generate_run_id,
+    redact_secrets,
+    utc_now,
+)
 from project.marsadh_orchestrator.workspace import (
     EXCLUDED_DIR_NAMES,
     UnsupportedWorkspaceStateError,
@@ -74,9 +88,15 @@ from project.schemas import (
     HumanDecisionRequest,
     IndividualTestOutcome,
     ModifiedVerificationResult,
+    PatchAttemptRecord,
     PatchGenerationRequest,
     PatchGenerationResult,
     PatchModelMetadata,
+    RepairAttemptHistory,
+    RepairEligibilityCategory,
+    RepairEligibilityResult,
+    RepairPolicy,
+    RepairTerminationReason,
     RepositoryInfo,
     RequirementAnalysisResult,
     RequirementTraceability,
@@ -128,6 +148,8 @@ ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
         WorkflowState.RUNNING_BASELINE_VERIFICATION,
         WorkflowState.RUNNING_MODIFIED_VERIFICATION,
         WorkflowState.COMPARING_VERIFICATION_RESULTS,
+        WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+        WorkflowState.REPAIRING_PATCH,
         WorkflowState.RUNNING_VERIFICATION,
         WorkflowState.COMPILING_REPORT,
     }
@@ -169,18 +191,26 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.VALIDATING_PATCH: frozenset(
         {
             WorkflowState.APPLYING_PATCH,
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
     ),
     WorkflowState.APPLYING_PATCH: frozenset(
         {
             WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
     ),
     WorkflowState.ANALYZING_POST_PATCH_IMPACT: frozenset(
         {
             WorkflowState.GENERATING_TESTS,
+            WorkflowState.PREPARING_BASELINE,
+            WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
     ),
@@ -219,6 +249,22 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     ),
     WorkflowState.COMPARING_VERIFICATION_RESULTS: frozenset(
         {
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            WorkflowState.COMPILING_REPORT,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY: frozenset(
+        {
+            WorkflowState.REPAIRING_PATCH,
+            WorkflowState.COMPILING_REPORT,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.REPAIRING_PATCH: frozenset(
+        {
+            WorkflowState.VALIDATING_PATCH,
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -619,6 +665,7 @@ class OrchestratorService:
         use_default_offline_stub: bool = True,
         cleanup_baseline_workspace: bool = True,
         before_baseline_execution_hook: Callable[[WorkflowRunRecord, Path], None] | None = None,
+        before_repair_provider_hook: Callable[[WorkflowRunRecord, int], None] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -646,6 +693,7 @@ class OrchestratorService:
         self._live_model_label = live_model_label
         self._cleanup_baseline_workspace = cleanup_baseline_workspace
         self._before_baseline_execution_hook = before_baseline_execution_hook
+        self._before_repair_provider_hook = before_repair_provider_hook
 
     # ------------------------------------------------------------------
     # Persistence & structured logging helpers
@@ -846,11 +894,38 @@ class OrchestratorService:
                 details={"interrupted_stage": run.state.value},
                 retryable=False,
             )
+            def _mark_interrupted_repair(current: WorkflowRunRecord) -> WorkflowRunRecord:
+                if current.repair_history is None and current.state not in {
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    WorkflowState.REPAIRING_PATCH,
+                }:
+                    return current
+                hist_updated = (
+                    current.repair_history.model_copy(
+                        update={
+                            "termination_reason": RepairTerminationReason.PROCESS_INTERRUPTED,
+                            "termination_summary": (
+                                f"Interrupted during active stage '{current.state.value}'; "
+                                "repair provider calls and patch applications were not replayed."
+                            ),
+                        }
+                    )
+                    if current.repair_history is not None
+                    else None
+                )
+                return current.model_copy(
+                    update={
+                        "repair_termination_reason": RepairTerminationReason.PROCESS_INTERRUPTED,
+                        "repair_history": hist_updated,
+                    }
+                )
+
             try:
                 updated = self._fail_run(
                     run.run_id,
                     run.state,
                     err,
+                    updater=_mark_interrupted_repair,
                     reason=f"Recovered interrupted run from stage {run.state.value}",
                 )
                 recovered.append(updated)
@@ -879,12 +954,21 @@ class OrchestratorService:
             ) from exc
 
         run_id = generate_run_id()
+        if request.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
+            repair_policy = self.config.build_repair_policy(
+                enabled_override=request.repair_enabled,
+                max_repair_attempts_override=request.max_repair_attempts,
+            )
+        else:
+            repair_policy = RepairPolicy(enabled=False, max_repair_attempts=0)
         record = WorkflowRunRecord(
             run_id=run_id,
             state=WorkflowState.CREATED,
             requirements=request.requirements,
             workflow_mode=request.workflow_mode,
             execution_mode=request.execution_mode,
+            repair_policy=repair_policy,
+            repair_attempts_consumed=0,
             repository=RepositoryInfo(
                 repository_id=request.repository_id,
                 repository_path=str(resolved_repo),
@@ -1762,6 +1846,8 @@ class OrchestratorService:
             relevant_source_files=relevant_source_files,
             relevant_source_file_paths=sorted(relevant_source_files.keys()),
             attempt_number=attempt_number,
+            attempt_type="initial",
+            repair_attempt_number=0,
             execution_mode=run.execution_mode.value,
             previous_verification_evidence=None,
         )
@@ -3321,23 +3407,182 @@ class OrchestratorService:
                 output_summary=cmp_summary,
             )
 
-            # Transition COMPARING_VERIFICATION_RESULTS -> COMPILING_REPORT
-            run = self.transition_state(
-                run_id,
-                WorkflowState.COMPARING_VERIFICATION_RESULTS,
-                WorkflowState.COMPILING_REPORT,
-                updater=lambda current: current.model_copy(
-                    update={
-                        "verification": ver_result,
-                        "baseline_comparison": comparison,
-                        "agent_records": [*current.agent_records, cmp_rec],
-                    }
-                ),
-                reason=(
-                    f"Baseline-versus-modified comparison finished (status={comparison.status.value}); "
-                    "compiling auditable change package report."
-                ),
-            )
+            # Transition COMPARING_VERIFICATION_RESULTS -> COMPILING_REPORT (verify_existing_change)
+            # OR COMPARING_VERIFICATION_RESULTS -> EVALUATING_REPAIR_ELIGIBILITY (generate_and_verify_change)
+            if run.workflow_mode != WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                    WorkflowState.COMPILING_REPORT,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "verification": ver_result,
+                            "baseline_comparison": comparison,
+                            "agent_records": [*current.agent_records, cmp_rec],
+                        }
+                    ),
+                    reason=(
+                        f"Baseline-versus-modified comparison finished (status={comparison.status.value}); "
+                        "compiling auditable change package report."
+                    ),
+                )
+            else:
+                initial_policy = run.repair_policy or self.config.build_repair_policy()
+                initial_durations: dict[str, int] = {
+                    "baseline_verification_ms": (
+                        base_ver_dur_ms if baseline_ready else 0
+                    ),
+                    "modified_verification_ms": m04_dur_ms,
+                    "comparison_ms": cmp_dur_ms,
+                }
+                for rec in run.agent_records:
+                    if rec.stage == WorkflowState.GENERATING_PATCH.value:
+                        initial_durations["patch_generation_ms"] = rec.duration_ms
+                    elif rec.stage == WorkflowState.VALIDATING_PATCH.value:
+                        initial_durations["patch_validation_ms"] = rec.duration_ms
+                    elif rec.stage == WorkflowState.APPLYING_PATCH.value:
+                        initial_durations["patch_application_ms"] = rec.duration_ms
+                    elif rec.stage == WorkflowState.ANALYZING_POST_PATCH_IMPACT.value:
+                        initial_durations["impact_analysis_ms"] = rec.duration_ms
+
+                init_failures = list(modified_result.failures)
+                if modified_result.existing_regression_suite is not None:
+                    init_failures.extend(modified_result.existing_regression_suite.failures)
+                init_errors: list[AgentError] = []
+                if modified_result.error is not None:
+                    init_errors.append(modified_result.error)
+                if baseline_result is not None and baseline_result.error is not None:
+                    init_errors.append(baseline_result.error)
+                init_passed_clean = bool(
+                    modified_result.verification_passed
+                    and comparison.status == VerificationComparisonStatus.COMPLETED
+                    and not comparison.summary.has_confirmed_regression
+                    and (
+                        modified_result.existing_regression_suite is None
+                        or modified_result.existing_regression_suite.verification_outcome
+                        == VerificationOutcome.PASSED
+                    )
+                )
+                init_sig = compute_failure_signature(
+                    modified=modified_result,
+                    comparison=comparison,
+                )
+                init_proposal = (
+                    run.patch_generation.proposal
+                    if run.patch_generation is not None
+                    else None
+                )
+                init_attempt = PatchAttemptRecord(
+                    attempt_number=1,
+                    attempt_type="initial",
+                    repair_attempt_index=0,
+                    original_requirement=run.requirements,
+                    acceptance_criterion_ids=(
+                        [ac.criterion_id for ac in run.requirement_analysis.acceptance_criteria]
+                        if run.requirement_analysis is not None
+                        else []
+                    ),
+                    previous_proposal_id=None,
+                    previous_patch_sha256=None,
+                    base_snapshot_sha256=run.original_source_snapshot_sha256,
+                    resulting_source_snapshot_sha256=run.source_snapshot_sha256,
+                    resulting_git_diff_sha256=run.git_diff_sha256,
+                    patch_generation=run.patch_generation,
+                    patch_proposal_id=(
+                        init_proposal.proposal_id if init_proposal is not None else None
+                    ),
+                    patch_sha256=run.patch_proposal_sha256,
+                    patch_validation=run.patch_validation,
+                    patch_application=run.patch_application,
+                    approved_test_ids=list(selected_ids),
+                    approved_test_hashes=dict(run.test_review.approved_test_hashes),
+                    baseline_reused=False,
+                    baseline_verification=baseline_result,
+                    modified_verification=modified_result,
+                    failure_diagnostics=init_failures,
+                    failure_signature=init_sig,
+                    baseline_comparison=comparison,
+                    repair_eligibility=None,
+                    provider_invoked=True,
+                    consumed_repair_budget=False,
+                    is_deterministic_fixture=(
+                        run.patch_generation.is_deterministic_fixture
+                        if run.patch_generation is not None
+                        else False
+                    ),
+                    is_mock_output=(
+                        run.patch_generation.is_mock_output
+                        if run.patch_generation is not None
+                        else False
+                    ),
+                    model_label=(
+                        run.patch_generation.model_metadata.model_label
+                        if run.patch_generation is not None
+                        else None
+                    ),
+                    durations_ms=initial_durations,
+                    started_at=run.created_at,
+                    completed_at=utc_now(),
+                    outcome="passed" if init_passed_clean else "failed_verification",
+                    errors=init_errors,
+                )
+                init_history = RepairAttemptHistory(
+                    policy=initial_policy,
+                    total_proposals_attempted=1,
+                    repair_attempts_consumed=run.repair_attempts_consumed,
+                    current_attempt_number=1,
+                    remaining_repair_budget=max(
+                        0,
+                        initial_policy.effective_max_repair_attempts
+                        - run.repair_attempts_consumed,
+                    ),
+                    attempts=[init_attempt],
+                    seen_patch_hashes=(
+                        [run.patch_proposal_sha256] if run.patch_proposal_sha256 else []
+                    ),
+                    seen_failure_signatures=[init_sig] if init_sig else [],
+                    final_candidate_attempt_number=1,
+                    final_candidate_proposal_id=(
+                        init_proposal.proposal_id if init_proposal is not None else None
+                    ),
+                    final_candidate_patch_sha256=run.patch_proposal_sha256,
+                )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "verification": ver_result,
+                            "baseline_comparison": comparison,
+                            "repair_policy": initial_policy,
+                            "repair_history": init_history,
+                            "agent_records": [*current.agent_records, cmp_rec],
+                        }
+                    ),
+                    reason=(
+                        f"Initial verification comparison finished (status={comparison.status.value}); "
+                        "evaluating bounded automated patch repair eligibility."
+                    ),
+                )
+
+                run, ver_result = self._run_bounded_repair_loop(
+                    run=run,
+                    specs=specs,
+                    selected_ids=selected_ids,
+                    scenarios_by_id=scenarios_by_id,
+                    test_purposes=test_purposes,
+                    criterion_ids_by_test=criterion_ids_by_test,
+                    is_trusted_workspace=is_trusted_workspace,
+                    baseline_ref_label=baseline_ref_label,
+                    baseline_result=baseline_result,
+                    baseline_snapshot_sha=baseline_snapshot_sha,
+                    modified_result=modified_result,
+                    comparison=comparison,
+                    ver_result=ver_result,
+                )
+                if run.state != WorkflowState.COMPILING_REPORT:
+                    return run
         finally:
             if self._cleanup_baseline_workspace and baseline_workspace_path:
                 try:
@@ -3391,6 +3636,1747 @@ class OrchestratorService:
                 f"Auditable change package compiled ({report.recommendation_label}); "
                 "awaiting final human decision."
             ),
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 8 (P0-8): Bounded Automated Patch Repair Orchestration
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _verify_approved_tests_in_workspace(
+        workspace_path: str | Path,
+        specs: Mapping[str, ApprovedTestSpec],
+        selected_ids: list[str],
+    ) -> tuple[bool, dict[str, str], AgentError | None]:
+        """Verify every approved test file in ``workspace_path`` matches its Gate 1 SHA-256."""
+        ws_root = Path(workspace_path).resolve()
+        verified: dict[str, str] = {}
+        for tid in selected_ids:
+            spec = specs.get(tid)
+            if spec is None or not spec.approved:
+                return (
+                    False,
+                    verified,
+                    AgentError(
+                        code="UNAPPROVED_TEST",
+                        message=f"Scenario '{tid}' is not registered as approved.",
+                    ),
+                )
+            candidate = ws_root / spec.relative_path
+            if candidate.is_symlink() or not candidate.is_file():
+                return (
+                    False,
+                    verified,
+                    AgentError(
+                        code="TEST_FILE_MISSING",
+                        message=f"Approved test file missing or unsafe inside workspace: '{spec.relative_path}'",
+                        details={"test_id": tid},
+                    ),
+                )
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(ws_root):
+                return (
+                    False,
+                    verified,
+                    AgentError(
+                        code="UNAUTHORIZED_TEST_PATH",
+                        message=f"Approved test path escapes workspace: '{spec.relative_path}'",
+                        details={"test_id": tid},
+                    ),
+                )
+            actual_sha = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if not hmac.compare_digest(actual_sha, spec.expected_sha256):
+                return (
+                    False,
+                    verified,
+                    AgentError(
+                        code="TEST_CONTENT_MODIFIED",
+                        message=(
+                            f"Approved test '{tid}' ({spec.relative_path}) no longer matches "
+                            "its Gate 1 approved SHA-256 digest."
+                        ),
+                        details={
+                            "test_id": tid,
+                            "expected_sha256": spec.expected_sha256,
+                            "actual_sha256": actual_sha,
+                        },
+                    ),
+                )
+            verified[tid] = actual_sha
+        return True, verified, None
+
+    def _is_baseline_reusable(
+        self,
+        *,
+        policy: RepairPolicy,
+        baseline_result: BaselineVerificationResult | None,
+        baseline_snapshot_sha: str | None,
+        original_snapshot_sha: str | None,
+        resolved_base_commit: str | None,
+        expected_approved_hashes: Mapping[str, str],
+        repair_workspace_path: str | Path,
+        source_path: str,
+    ) -> bool:
+        """Return True iff baseline snapshot, approved test hashes, and regression suite hashes match."""
+        if not policy.reuse_validated_baseline:
+            return False
+        if baseline_result is None or baseline_result.execution_status != "completed":
+            return False
+        if not resolved_base_commit or baseline_result.baseline_commit != resolved_base_commit:
+            return False
+        if (
+            not baseline_snapshot_sha
+            or not original_snapshot_sha
+            or not baseline_result.source_snapshot_sha256
+        ):
+            return False
+        if not (
+            hmac.compare_digest(baseline_result.source_snapshot_sha256, baseline_snapshot_sha)
+            and hmac.compare_digest(baseline_snapshot_sha, original_snapshot_sha)
+        ):
+            return False
+        if dict(baseline_result.approved_test_hashes) != dict(expected_approved_hashes):
+            return False
+
+        # Verify existing repository regression test hashes in repair workspace match baseline
+        discovered_now = discover_existing_regression_tests(
+            repair_workspace_path,
+            source_path=source_path,
+            timeout_seconds=self.config.git_timeout_seconds,
+        )
+        ws_root = Path(repair_workspace_path).resolve()
+        current_reg_hashes = {
+            rel: hashlib.sha256((ws_root / rel).read_bytes()).hexdigest()
+            for rel in discovered_now
+            if (ws_root / rel).is_file()
+        }
+        base_reg_hashes = (
+            dict(baseline_result.existing_regression_suite.test_file_hashes)
+            if baseline_result.existing_regression_suite is not None
+            else {}
+        )
+        return current_reg_hashes == base_reg_hashes
+
+    @staticmethod
+    def _termination_reason_from_eligibility(
+        category: RepairEligibilityCategory,
+        *,
+        repair_attempts_consumed: int,
+    ) -> RepairTerminationReason:
+        if category == RepairEligibilityCategory.NOT_NEEDED_VERIFICATION_PASSED:
+            return (
+                RepairTerminationReason.REPAIR_SUCCEEDED
+                if repair_attempts_consumed > 0
+                else RepairTerminationReason.NOT_NEEDED
+            )
+        if category == RepairEligibilityCategory.REPAIR_DISABLED:
+            return RepairTerminationReason.REPAIR_DISABLED
+        if category == RepairEligibilityCategory.WORKFLOW_MODE_UNSUPPORTED:
+            return RepairTerminationReason.WORKFLOW_MODE_UNSUPPORTED
+        if category == RepairEligibilityCategory.BUDGET_EXHAUSTED:
+            return RepairTerminationReason.BUDGET_EXHAUSTED
+        if category == RepairEligibilityCategory.WORKSPACE_OR_TEST_INTEGRITY_VIOLATION:
+            return RepairTerminationReason.WORKSPACE_INTEGRITY_ERROR
+        if category == RepairEligibilityCategory.PROVIDER_AUTH_OR_RATE_LIMIT:
+            return RepairTerminationReason.PROVIDER_ERROR
+        return RepairTerminationReason.INELIGIBLE_FAILURE
+
+    def _run_bounded_repair_loop(
+        self,
+        *,
+        run: WorkflowRunRecord,
+        specs: Mapping[str, ApprovedTestSpec],
+        selected_ids: list[str],
+        scenarios_by_id: Mapping[str, Any],
+        test_purposes: Mapping[str, Any],
+        criterion_ids_by_test: Mapping[str, list[str]],
+        is_trusted_workspace: bool,
+        baseline_ref_label: str,
+        baseline_result: BaselineVerificationResult | None,
+        baseline_snapshot_sha: str | None,
+        modified_result: ModifiedVerificationResult,
+        comparison: BaselineComparisonEvidence,
+        ver_result: VerificationResult,
+    ) -> tuple[WorkflowRunRecord, VerificationResult]:
+        """Execute bounded automated patch repair loop (max 2 repair attempts, 3 total proposals).
+
+        Starts in ``WorkflowState.EVALUATING_REPAIR_ELIGIBILITY`` and finishes in
+        ``WorkflowState.COMPILING_REPORT`` (or ``WorkflowState.FAILED`` on hard
+        integrity violations). Never auto-approves, commits, merges, pushes, or
+        mutates the original repository.
+        """
+        run_id = run.run_id
+        assert run.repair_history is not None
+        assert run.test_review is not None
+        history = run.repair_history
+        policy = history.policy
+        initial_cb = run.codebase_analysis
+        approved_test_codes = {
+            sid: scenarios_by_id[sid].test_code
+            for sid in selected_ids
+            if sid in scenarios_by_id
+        }
+
+        known_repo_modules: set[str] = set()
+        if run.pre_change_context is not None:
+            for rel_p in run.pre_change_context.indexed_file_paths:
+                known_repo_modules.add(PurePath(rel_p).stem)
+                for part in PurePath(rel_p).parts[:-1]:
+                    known_repo_modules.add(part)
+
+        protected_test_paths: set[str] = {
+            spec.relative_path for spec in specs.values()
+        }
+        if baseline_result is not None and baseline_result.existing_regression_suite is not None:
+            protected_test_paths.update(
+                baseline_result.existing_regression_suite.discovered_test_paths
+            )
+        if modified_result.existing_regression_suite is not None:
+            protected_test_paths.update(
+                modified_result.existing_regression_suite.discovered_test_paths
+            )
+        if run.workspace_path and Path(run.workspace_path).is_dir():
+            protected_test_paths.update(
+                discover_existing_regression_tests(
+                    run.workspace_path,
+                    source_path=run.repository.source_path,
+                    timeout_seconds=self.config.git_timeout_seconds,
+                )
+            )
+
+        valid_cids = (
+            {ac.criterion_id for ac in run.requirement_analysis.acceptance_criteria}
+            if run.requirement_analysis is not None
+            else set()
+        )
+        raw_allowed_paths = (
+            list(run.patch_generation_request.allowed_modification_paths)
+            if run.patch_generation_request is not None
+            and run.patch_generation_request.allowed_modification_paths
+            else (
+                [run.repository.source_path]
+                if run.repository.source_path not in {"", "."}
+                else (
+                    list(run.pre_change_context.indexed_file_paths)
+                    if run.pre_change_context is not None
+                    else []
+                )
+            )
+        )
+        allowed_mod_paths = [
+            p
+            for p in raw_allowed_paths
+            if p not in protected_test_paths
+            and ".changeguard_generated_tests" not in PurePath(p).parts
+            and "tests" not in PurePath(p).parts
+        ]
+
+        last_ver_result = ver_result
+        last_modified = modified_result
+        last_comparison = comparison
+        active_baseline_result = baseline_result
+        active_baseline_snapshot_sha = baseline_snapshot_sha
+        last_provider_error: AgentError | None = None
+
+        def _finalize_to_report(
+            current_run: WorkflowRunRecord,
+            from_state: WorkflowState,
+            hist: RepairAttemptHistory,
+            reason_enum: RepairTerminationReason,
+            summary_text: str,
+            eligibility_obj: RepairEligibilityResult | None,
+        ) -> tuple[WorkflowRunRecord, VerificationResult]:
+            final_hist = hist.model_copy(
+                update={
+                    "last_eligibility": eligibility_obj or hist.last_eligibility,
+                    "termination_reason": reason_enum,
+                    "termination_summary": redact_secrets(summary_text),
+                }
+            )
+            updated_run = self.transition_state(
+                run_id,
+                from_state,
+                WorkflowState.COMPILING_REPORT,
+                updater=lambda cur: cur.model_copy(
+                    update={
+                        "repair_attempts_consumed": final_hist.repair_attempts_consumed,
+                        "repair_eligibility": final_hist.last_eligibility,
+                        "repair_termination_reason": reason_enum,
+                        "repair_history": final_hist,
+                    }
+                ),
+                reason=f"Bounded repair ended ({reason_enum.value}): {summary_text}",
+            )
+            return updated_run, last_ver_result
+
+        # Hard structural upper bound: at most effective_max_repair_attempts + 1 evaluations
+        for _iteration in range(policy.effective_max_repair_attempts + 1):
+            # 1. Verify active workspace & approved test integrity before eligibility evaluation
+            try:
+                self._verify_workspace_snapshot(run)
+            except WorkflowIntegrityError as exc:
+                err = AgentError(code=exc.code, message=exc.message, details=exc.details)
+                self._log(
+                    run_id=run_id,
+                    agent_name="IntegrityVerifier",
+                    stage=WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    status=AgentExecutionStatus.FAILED,
+                    output_summary=exc.message,
+                    error=err,
+                )
+                return (
+                    self._fail_run(
+                        run_id, WorkflowState.EVALUATING_REPAIR_ELIGIBILITY, err
+                    ),
+                    last_ver_result,
+                )
+
+            assert run.workspace_path is not None
+            tests_ok, _verified_hashes, test_integrity_err = (
+                self._verify_approved_tests_in_workspace(
+                    run.workspace_path, specs, selected_ids
+                )
+            )
+            if not tests_ok and test_integrity_err is not None:
+                self._log(
+                    run_id=run_id,
+                    agent_name="IntegrityVerifier",
+                    stage=WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    status=AgentExecutionStatus.FAILED,
+                    output_summary=test_integrity_err.message,
+                    error=test_integrity_err,
+                )
+                return (
+                    self._fail_run(
+                        run_id,
+                        WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                        test_integrity_err,
+                    ),
+                    last_ver_result,
+                )
+
+            # 2. Evaluate conservative deterministic repair eligibility
+            elig_started = utc_now()
+            elig_t0 = time.perf_counter()
+            eligibility = RepairEligibilityEvaluator.evaluate(
+                workflow_mode=run.workflow_mode,
+                policy=policy,
+                patch_application=run.patch_application,
+                requirement_analysis=run.requirement_analysis,
+                baseline=active_baseline_result,
+                modified=last_modified,
+                comparison=last_comparison,
+                current_attempt_number=history.current_attempt_number,
+                repair_attempts_consumed=history.repair_attempts_consumed,
+                workspace_integrity_ok=True,
+                approved_tests_valid_and_unchanged=tests_ok,
+                provider_error=last_provider_error,
+                known_repo_modules=known_repo_modules,
+            )
+            elig_dur_ms = int((time.perf_counter() - elig_t0) * 1000)
+
+            # Attach eligibility decision onto the most recent verified attempt without mutating prior ones
+            updated_attempts = list(history.attempts)
+            if updated_attempts and updated_attempts[-1].repair_eligibility is None:
+                updated_attempts[-1] = updated_attempts[-1].model_copy(
+                    update={"repair_eligibility": eligibility}
+                )
+            history = history.model_copy(
+                update={
+                    "attempts": updated_attempts,
+                    "last_eligibility": eligibility,
+                }
+            )
+
+            elig_rec = AgentExecutionRecord(
+                agent_name="RepairEligibilityEvaluator",
+                stage=WorkflowState.EVALUATING_REPAIR_ELIGIBILITY.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=elig_started,
+                completed_at=utc_now(),
+                duration_ms=elig_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"eligible={eligibility.eligible}, category={eligibility.category.value}, "
+                    f"remaining_budget={eligibility.remaining_repair_budget}: "
+                    f"{eligibility.decision_reason}"
+                ),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="RepairEligibilityEvaluator",
+                stage=WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=elig_dur_ms,
+                input_summary=(
+                    f"attempt={history.current_attempt_number}, "
+                    f"repair_consumed={history.repair_attempts_consumed}/{policy.effective_max_repair_attempts}"
+                ),
+                output_summary=elig_rec.output_summary,
+            )
+            run = self.store.update_run_atomic(
+                run_id,
+                expected_state=WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                updater=lambda cur: cur.model_copy(
+                    update={
+                        "repair_eligibility": eligibility,
+                        "repair_history": history,
+                        "agent_records": [*cur.agent_records, elig_rec],
+                    }
+                ),
+            )
+
+            # 3. Stop if not eligible
+            if not eligibility.eligible or eligibility.next_attempt_number is None:
+                term_reason = self._termination_reason_from_eligibility(
+                    eligibility.category,
+                    repair_attempts_consumed=history.repair_attempts_consumed,
+                )
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    history,
+                    term_reason,
+                    eligibility.decision_reason,
+                    eligibility,
+                )
+
+            next_attempt = eligibility.next_attempt_number
+            repair_idx = next_attempt - 1
+            if (
+                history.repair_attempts_consumed >= policy.effective_max_repair_attempts
+                or next_attempt > policy.max_total_proposals
+            ):
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    history,
+                    RepairTerminationReason.BUDGET_EXHAUSTED,
+                    "Configured bounded repair budget exhausted.",
+                    eligibility,
+                )
+
+            # 4. Prepare clean isolated repair workspace from the immutable original commit
+            repair_attempt_started = utc_now()
+            repair_durations: dict[str, int] = {}
+            resolved_base_commit = run.repository.resolved_base_commit
+            if (
+                not resolved_base_commit
+                or not run.original_source_snapshot_sha256
+                or not run.original_git_diff_sha256
+            ):
+                err = AgentError(
+                    code="ORIGINAL_SNAPSHOT_UNAVAILABLE",
+                    message=(
+                        "Immutable original snapshot metadata is unavailable; cannot safely "
+                        "restore a clean workspace for bounded patch repair."
+                    ),
+                )
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    history,
+                    RepairTerminationReason.WORKSPACE_INTEGRITY_ERROR,
+                    err.message,
+                    eligibility,
+                )
+
+            repair_ws_ctx = None
+            repair_ws_path: str | None = None
+            try:
+                repair_ws_ctx = self.workspace_manager.prepare_clean_repair_workspace(
+                    run_id,
+                    run.repository.repository_path,
+                    resolved_base_commit,
+                    next_attempt,
+                    source_path=run.repository.source_path,
+                    base_ref=run.repository.base_ref,
+                )
+                repair_ws_path = repair_ws_ctx.workspace_repo_path
+                clean_snap = compute_source_snapshot_sha256(
+                    repair_ws_path, repair_ws_ctx.source_path
+                )
+                clean_diff = compute_git_diff_sha256(
+                    repair_ws_path,
+                    repair_ws_ctx.effective_base_ref,
+                    repair_ws_ctx.source_path,
+                    timeout_seconds=self.config.git_timeout_seconds,
+                )
+                if not (
+                    hmac.compare_digest(clean_snap, run.original_source_snapshot_sha256)
+                    and hmac.compare_digest(clean_diff, run.original_git_diff_sha256)
+                ):
+                    err = AgentError(
+                        code="ORIGINAL_SNAPSHOT_MISMATCH",
+                        message=(
+                            "Restored clean repair workspace snapshot does not match the "
+                            "approved immutable original snapshot."
+                        ),
+                        details={
+                            "expected_snapshot_sha256": run.original_source_snapshot_sha256,
+                            "actual_snapshot_sha256": clean_snap,
+                        },
+                    )
+                    self.workspace_manager.cleanup_workspace(repair_ws_path)
+                    return (
+                        self._fail_run(
+                            run_id, WorkflowState.EVALUATING_REPAIR_ELIGIBILITY, err
+                        ),
+                        last_ver_result,
+                    )
+
+                target_modules: list[str] = []
+                if run.requirement_analysis is not None:
+                    for ac in run.requirement_analysis.acceptance_criteria:
+                        for mod in ac.target_modules:
+                            if mod not in target_modules:
+                                target_modules.append(mod)
+                pre_ctx_clean, clean_relevant_files = (
+                    self.codebase_adapter.collect_pre_change_context(
+                        repair_ws_path,
+                        source_path=repair_ws_ctx.source_path,
+                        base_ref=repair_ws_ctx.effective_base_ref,
+                        target_modules=target_modules,
+                    )
+                )
+                if pre_ctx_clean.status != "completed" or not clean_relevant_files:
+                    err = pre_ctx_clean.error or AgentError(
+                        code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                        message="Failed to collect clean original source files for repair request.",
+                    )
+                    self.workspace_manager.cleanup_workspace(repair_ws_path)
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                        history,
+                        RepairTerminationReason.WORKSPACE_INTEGRITY_ERROR,
+                        err.message,
+                        eligibility,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if repair_ws_path:
+                    try:
+                        self.workspace_manager.cleanup_workspace(repair_ws_path)
+                    except WorkspaceError:
+                        pass
+                err = AgentError(
+                    code="REPAIR_WORKSPACE_PREPARATION_FAILED",
+                    message=f"Failed to restore clean repair workspace: {exc}",
+                )
+                return (
+                    self._fail_run(
+                        run_id, WorkflowState.EVALUATING_REPAIR_ELIGIBILITY, err
+                    ),
+                    last_ver_result,
+                )
+
+            # 5. Build typed, sanitized A4 repair request targeting the immutable original snapshot
+            prev_proposal = (
+                run.patch_generation.proposal
+                if run.patch_generation is not None
+                else None
+            )
+            prev_patch_diff = (
+                redact_secrets(prev_proposal.unified_diff)
+                if prev_proposal is not None
+                else ""
+            )
+            prev_patch_sha = (
+                prev_proposal.patch_sha256
+                if prev_proposal is not None
+                else run.patch_proposal_sha256
+            )
+            prev_proposal_id = (
+                prev_proposal.proposal_id if prev_proposal is not None else None
+            )
+            sanitized_diags, comparison_payload, prev_ver_payload = (
+                build_repair_request_evidence(
+                    comparison=last_comparison,
+                    modified=last_modified,
+                    eligibility=eligibility,
+                )
+            )
+            repair_request = PatchGenerationRequest(
+                run_id=run_id,
+                original_requirement=run.requirements,
+                acceptance_criteria=(
+                    list(run.requirement_analysis.acceptance_criteria)
+                    if run.requirement_analysis is not None
+                    else []
+                ),
+                business_constraints=(
+                    list(run.requirement_analysis.business_constraints)
+                    if run.requirement_analysis is not None
+                    else []
+                ),
+                unresolved_ambiguities=(
+                    [
+                        amb
+                        for amb in run.requirement_analysis.ambiguities
+                        if not amb.resolved
+                    ]
+                    if run.requirement_analysis is not None
+                    else []
+                ),
+                repository_snapshot_ref=resolved_base_commit,
+                base_ref=run.repository.base_ref,
+                resolved_base_commit=resolved_base_commit,
+                source_snapshot_sha256=run.original_source_snapshot_sha256,
+                source_path=run.repository.source_path,
+                codebase_context=pre_ctx_clean,
+                allowed_modification_paths=allowed_mod_paths,
+                relevant_source_files=clean_relevant_files,
+                relevant_source_file_paths=sorted(clean_relevant_files.keys()),
+                attempt_number=next_attempt,
+                attempt_type="repair",
+                repair_attempt_number=repair_idx,
+                execution_mode=run.execution_mode.value,
+                previous_proposal_id=prev_proposal_id,
+                previous_proposed_patch=prev_patch_diff,
+                previous_patch_sha256=prev_patch_sha,
+                prior_patch_hashes=list(history.seen_patch_hashes),
+                failure_diagnostics=sanitized_diags,
+                baseline_comparison_evidence=comparison_payload,
+                failed_criterion_ids=list(eligibility.failed_criterion_ids),
+                previous_verification_evidence=prev_ver_payload,
+            )
+
+            # 6. Atomically consume repair budget and persist BEFORE invoking A4 provider!
+            new_consumed = history.repair_attempts_consumed + 1
+            new_total_proposals = history.total_proposals_attempted + 1
+            history = history.model_copy(
+                update={
+                    "total_proposals_attempted": new_total_proposals,
+                    "repair_attempts_consumed": new_consumed,
+                    "current_attempt_number": next_attempt,
+                    "remaining_repair_budget": max(
+                        0, policy.effective_max_repair_attempts - new_consumed
+                    ),
+                }
+            )
+            run = self.transition_state(
+                run_id,
+                WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                WorkflowState.REPAIRING_PATCH,
+                updater=lambda cur: cur.model_copy(
+                    update={
+                        "patch_generation_request": repair_request,
+                        "patch_attempt_number": next_attempt,
+                        "repair_attempts_consumed": new_consumed,
+                        "repair_history": history,
+                    }
+                ),
+                reason=(
+                    f"Starting bounded repair attempt #{repair_idx} "
+                    f"(proposal {next_attempt}/{policy.max_total_proposals}); "
+                    f"budget consumed={new_consumed}/{policy.effective_max_repair_attempts}."
+                ),
+            )
+
+            if self._before_repair_provider_hook is not None:
+                self._before_repair_provider_hook(run, next_attempt)
+
+            # 7. Invoke A4 PatchGenerationAdapter
+            a4_started = utc_now()
+            a4_t0 = time.perf_counter()
+            self._log(
+                run_id=run_id,
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.REPAIRING_PATCH,
+                status=AgentExecutionStatus.SUCCEEDED,
+                input_summary=(
+                    f"repair_attempt={repair_idx}, attempt={next_attempt}, "
+                    f"mode={run.execution_mode.value}, "
+                    f"failed_criteria={eligibility.failed_criterion_ids}, "
+                    f"prev_sha={prev_patch_sha[:12] if prev_patch_sha else 'none'}"
+                ),
+                output_summary="Invoked A4 PatchGenerationAdapter.generate for bounded repair.",
+            )
+            try:
+                patch_result = self.patch_adapter.generate(repair_request)
+            except Exception as exc:  # noqa: BLE001
+                gen_dur_ms = int((time.perf_counter() - a4_t0) * 1000)
+                repair_durations["patch_generation_ms"] = gen_dur_ms
+                err = AgentError(
+                    code="A4_UNEXPECTED_ERROR",
+                    message=f"PatchGenerationAdapter raised an unexpected exception during repair: {exc}",
+                )
+                patch_result = PatchGenerationResult(
+                    status="error",
+                    attempt_number=next_attempt,
+                    proposal=None,
+                    model_metadata=PatchModelMetadata(
+                        provider=None,
+                        model_label="provider_error",
+                        generation_mode=run.execution_mode.value,
+                        is_deterministic_fixture=False,
+                        is_mock_output=False,
+                    ),
+                    is_deterministic_fixture=False,
+                    is_mock_output=False,
+                    error=err,
+                )
+            else:
+                gen_dur_ms = int((time.perf_counter() - a4_t0) * 1000)
+                repair_durations["patch_generation_ms"] = gen_dur_ms
+
+            def _make_failed_attempt_record(
+                *,
+                outcome: Any,
+                gen_res: PatchGenerationResult | None = None,
+                val_res: Any = None,
+                app_res: Any = None,
+                errors: list[AgentError] | None = None,
+                notes: list[str] | None = None,
+            ) -> PatchAttemptRecord:
+                prop = gen_res.proposal if gen_res is not None else None
+                return PatchAttemptRecord(
+                    attempt_number=next_attempt,
+                    attempt_type="repair",
+                    repair_attempt_index=repair_idx,
+                    original_requirement=run.requirements,
+                    acceptance_criterion_ids=sorted(valid_cids),
+                    previous_proposal_id=prev_proposal_id,
+                    previous_patch_sha256=prev_patch_sha,
+                    base_snapshot_sha256=run.original_source_snapshot_sha256,
+                    patch_generation=gen_res,
+                    patch_proposal_id=prop.proposal_id if prop is not None else None,
+                    patch_sha256=prop.patch_sha256 if prop is not None else None,
+                    patch_validation=val_res,
+                    patch_application=app_res,
+                    approved_test_ids=list(selected_ids),
+                    approved_test_hashes=dict(run.test_review.approved_test_hashes),
+                    provider_invoked=True,
+                    consumed_repair_budget=True,
+                    is_deterministic_fixture=(
+                        gen_res.is_deterministic_fixture if gen_res is not None else False
+                    ),
+                    is_mock_output=(
+                        gen_res.is_mock_output if gen_res is not None else False
+                    ),
+                    model_label=(
+                        gen_res.model_metadata.model_label if gen_res is not None else None
+                    ),
+                    durations_ms=dict(repair_durations),
+                    started_at=repair_attempt_started,
+                    completed_at=utc_now(),
+                    outcome=outcome,
+                    errors=list(errors or []),
+                    notes=list(notes or []),
+                )
+
+            # Handle non-proposed A4 result (unavailable / auth / rate-limit / invalid response)
+            if patch_result.status != "proposed" or patch_result.proposal is None:
+                err = patch_result.error or AgentError(
+                    code="PATCH_REPAIR_GENERATION_FAILED",
+                    message=(
+                        f"A4 repair attempt #{repair_idx} did not return a valid patch proposal "
+                        f"(status='{patch_result.status}')."
+                    ),
+                )
+                last_provider_error = err
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                a4_rec = AgentExecutionRecord(
+                    agent_name="PatchGenerationAdapter",
+                    stage=WorkflowState.REPAIRING_PATCH.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=a4_started,
+                    completed_at=utc_now(),
+                    duration_ms=gen_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=err.message,
+                    error=err,
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="PatchGenerationAdapter",
+                    stage=WorkflowState.REPAIRING_PATCH,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=gen_dur_ms,
+                    output_summary=err.message,
+                    error=err,
+                )
+                is_unavailable = (
+                    patch_result.status == "unavailable"
+                    or err.code == "PATCH_GENERATOR_UNAVAILABLE"
+                )
+                attempt_rec = _make_failed_attempt_record(
+                    outcome=(
+                        "generation_unavailable" if is_unavailable else "generation_failed"
+                    ),
+                    gen_res=patch_result,
+                    errors=[err],
+                    notes=[
+                        "Repair provider invocation consumed repair budget despite returning no usable patch."
+                    ],
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, attempt_rec]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.REPAIRING_PATCH,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, a4_rec],
+                        }
+                    ),
+                )
+                if is_unavailable:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.REPAIRING_PATCH,
+                        history,
+                        RepairTerminationReason.PROVIDER_UNAVAILABLE,
+                        err.message,
+                        eligibility,
+                    )
+                if (
+                    is_provider_auth_or_rate_limit_error(err)
+                    or err.code in {"LIVE_MODE_MOCK_REJECTED", "UNRESOLVED_REQUIREMENT_AMBIGUITY"}
+                ):
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.REPAIRING_PATCH,
+                        history,
+                        RepairTerminationReason.PROVIDER_ERROR,
+                        err.message,
+                        eligibility,
+                    )
+                if new_consumed >= policy.effective_max_repair_attempts:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.REPAIRING_PATCH,
+                        history,
+                        RepairTerminationReason.BUDGET_EXHAUSTED,
+                        f"Repair budget exhausted after invalid repair response: {err.message}",
+                        eligibility,
+                    )
+                last_provider_error = None
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.REPAIRING_PATCH,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    reason=(
+                        f"Repair attempt #{repair_idx} failed generation ({err.code}) and "
+                        "consumed repair budget; re-evaluating remaining budget."
+                    ),
+                )
+                continue
+
+            proposal = patch_result.proposal
+            a4_summary = (
+                f"Generated replacement patch '{proposal.proposal_id}' "
+                f"(sha256={proposal.patch_sha256[:12]}, repair_attempt={repair_idx}, "
+                f"attempt={next_attempt}, model={patch_result.model_metadata.model_label})."
+            )
+            a4_rec = AgentExecutionRecord(
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.REPAIRING_PATCH.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=a4_started,
+                completed_at=utc_now(),
+                duration_ms=gen_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=a4_summary,
+                assumptions=list(proposal.assumptions),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.REPAIRING_PATCH,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=gen_dur_ms,
+                input_summary=f"repair_attempt={repair_idx}, attempt={next_attempt}",
+                output_summary=a4_summary,
+            )
+
+            # 8. Duplicate patch detection BEFORE validation/application
+            if (
+                policy.stop_on_duplicate_patch
+                and proposal.patch_sha256 in history.seen_patch_hashes
+            ):
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                dup_err = AgentError(
+                    code="DUPLICATE_PATCH_PROPOSAL",
+                    message=(
+                        f"Repair attempt #{repair_idx} proposed an identical patch SHA-256 "
+                        f"({proposal.patch_sha256[:12]}) already attempted earlier; stopping "
+                        "bounded repair to prevent redundant retries."
+                    ),
+                    details={"duplicate_patch_sha256": proposal.patch_sha256},
+                )
+                dup_attempt = _make_failed_attempt_record(
+                    outcome="duplicate_patch_rejected",
+                    gen_res=patch_result,
+                    errors=[dup_err],
+                    notes=["Duplicate patch SHA-256 detected; skipped application and verification."],
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, dup_attempt]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.REPAIRING_PATCH,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, a4_rec],
+                        }
+                    ),
+                )
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.REPAIRING_PATCH,
+                    history,
+                    RepairTerminationReason.DUPLICATE_PATCH_DETECTED,
+                    dup_err.message,
+                    eligibility,
+                )
+
+            history = history.model_copy(
+                update={
+                    "seen_patch_hashes": [*history.seen_patch_hashes, proposal.patch_sha256]
+                }
+            )
+            run = self.transition_state(
+                run_id,
+                WorkflowState.REPAIRING_PATCH,
+                WorkflowState.VALIDATING_PATCH,
+                updater=lambda cur: cur.model_copy(
+                    update={
+                        "repair_history": history,
+                        "agent_records": [*cur.agent_records, a4_rec],
+                    }
+                ),
+                reason=(
+                    f"Distinct replacement patch '{proposal.proposal_id}' received; "
+                    "validating against immutable original snapshot."
+                ),
+            )
+
+            # 9. Validate replacement patch against clean original snapshot & forbid test modifications
+            val_started = utc_now()
+            val_t0 = time.perf_counter()
+            validation_result = self.patch_validator.validate(
+                workspace_repo_path=repair_ws_path,
+                proposal=proposal,
+                source_path=repair_ws_ctx.source_path,
+                base_ref=repair_ws_ctx.effective_base_ref,
+                allowed_modification_paths=allowed_mod_paths,
+                expected_source_snapshot_sha256=run.original_source_snapshot_sha256,
+                expected_git_diff_sha256=run.original_git_diff_sha256,
+                valid_criterion_ids=valid_cids if valid_cids else None,
+                forbidden_paths=protected_test_paths,
+                forbid_test_modifications=True,
+            )
+            val_dur_ms = int((time.perf_counter() - val_t0) * 1000)
+            repair_durations["patch_validation_ms"] = val_dur_ms
+
+            if not validation_result.valid:
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                primary_err = (
+                    validation_result.violations[0]
+                    if validation_result.violations
+                    else AgentError(
+                        code="PATCH_VALIDATION_FAILED",
+                        message="Replacement patch failed safety or applicability validation.",
+                    )
+                )
+                is_test_mod = any(
+                    v.code == "PATCH_TEST_MODIFICATION_FORBIDDEN"
+                    for v in validation_result.violations
+                )
+                val_rec = AgentExecutionRecord(
+                    agent_name="PatchValidator",
+                    stage=WorkflowState.VALIDATING_PATCH.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=val_started,
+                    completed_at=utc_now(),
+                    duration_ms=val_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=primary_err.message,
+                    error=primary_err,
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="PatchValidator",
+                    stage=WorkflowState.VALIDATING_PATCH,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=val_dur_ms,
+                    input_summary=f"repair_attempt={repair_idx}, sha={proposal.patch_sha256[:12]}",
+                    output_summary=primary_err.message,
+                    error=primary_err,
+                )
+                val_attempt = _make_failed_attempt_record(
+                    outcome=(
+                        "test_modification_rejected"
+                        if is_test_mod
+                        else "validation_failed"
+                    ),
+                    gen_res=patch_result,
+                    val_res=validation_result,
+                    errors=list(validation_result.violations),
+                    notes=[
+                        "Invalid replacement patch was rejected before application and consumed repair budget."
+                    ],
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, val_attempt]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.VALIDATING_PATCH,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, val_rec],
+                        }
+                    ),
+                )
+                if is_test_mod:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.VALIDATING_PATCH,
+                        history,
+                        RepairTerminationReason.TEST_MODIFICATION_REJECTED,
+                        primary_err.message,
+                        eligibility,
+                    )
+                if new_consumed >= policy.effective_max_repair_attempts:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.VALIDATING_PATCH,
+                        history,
+                        RepairTerminationReason.BUDGET_EXHAUSTED,
+                        f"Repair budget exhausted after invalid replacement patch: {primary_err.message}",
+                        eligibility,
+                    )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.VALIDATING_PATCH,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    reason=(
+                        f"Replacement patch #{repair_idx} failed validation ({primary_err.code}) "
+                        "and consumed repair budget; re-evaluating remaining budget."
+                    ),
+                )
+                continue
+
+            val_rec = AgentExecutionRecord(
+                agent_name="PatchValidator",
+                stage=WorkflowState.VALIDATING_PATCH.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=val_started,
+                completed_at=utc_now(),
+                duration_ms=val_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"Repair patch #{repair_idx} passed validation "
+                    f"({len(validation_result.checks_passed)} checks, files={validation_result.checked_files})."
+                ),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchValidator",
+                stage=WorkflowState.VALIDATING_PATCH,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=val_dur_ms,
+                input_summary=f"repair_attempt={repair_idx}, sha={proposal.patch_sha256[:12]}",
+                output_summary=val_rec.output_summary,
+            )
+            run = self.transition_state(
+                run_id,
+                WorkflowState.VALIDATING_PATCH,
+                WorkflowState.APPLYING_PATCH,
+                updater=lambda cur: cur.model_copy(
+                    update={"agent_records": [*cur.agent_records, val_rec]}
+                ),
+                reason=f"Replacement patch #{repair_idx} passed validation; applying inside clean isolated workspace.",
+            )
+
+            # 10. Apply validated replacement patch inside the clean repair workspace
+            app_started = utc_now()
+            app_t0 = time.perf_counter()
+            app_result = self.patch_applicator.apply(
+                workspace_repo_path=repair_ws_path,
+                proposal=proposal,
+                validation_result=validation_result,
+                source_path=repair_ws_ctx.source_path,
+                base_ref=repair_ws_ctx.effective_base_ref,
+                expected_source_snapshot_sha256=run.original_source_snapshot_sha256,
+                expected_git_diff_sha256=run.original_git_diff_sha256,
+            )
+            app_dur_ms = int((time.perf_counter() - app_t0) * 1000)
+            repair_durations["patch_application_ms"] = app_dur_ms
+
+            if (
+                not app_result.applied
+                or app_result.resulting_source_snapshot_sha256 is None
+                or app_result.resulting_git_diff_sha256 is None
+            ):
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                err = app_result.error or AgentError(
+                    code="PATCH_APPLICATION_FAILED",
+                    message=f"Replacement patch #{repair_idx} failed to apply cleanly.",
+                )
+                app_rec = AgentExecutionRecord(
+                    agent_name="PatchApplicator",
+                    stage=WorkflowState.APPLYING_PATCH.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=app_started,
+                    completed_at=utc_now(),
+                    duration_ms=app_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=err.message,
+                    error=err,
+                )
+                app_attempt = _make_failed_attempt_record(
+                    outcome="application_failed",
+                    gen_res=patch_result,
+                    val_res=validation_result,
+                    app_res=app_result,
+                    errors=[err],
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, app_attempt]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.APPLYING_PATCH,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, app_rec],
+                        }
+                    ),
+                )
+                if new_consumed >= policy.effective_max_repair_attempts:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.APPLYING_PATCH,
+                        history,
+                        RepairTerminationReason.BUDGET_EXHAUSTED,
+                        f"Repair budget exhausted after patch application failure: {err.message}",
+                        eligibility,
+                    )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.APPLYING_PATCH,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    reason=(
+                        f"Replacement patch #{repair_idx} failed application ({err.code}); "
+                        "re-evaluating remaining budget."
+                    ),
+                )
+                continue
+
+            app_rec = AgentExecutionRecord(
+                agent_name="PatchApplicator",
+                stage=WorkflowState.APPLYING_PATCH.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=app_started,
+                completed_at=utc_now(),
+                duration_ms=app_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"Applied replacement patch #{repair_idx} inside clean repair workspace "
+                    f"(files={app_result.applied_files}, "
+                    f"new_snap={app_result.resulting_source_snapshot_sha256[:12]})."
+                ),
+                assumptions=[app_result.isolation_note],
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchApplicator",
+                stage=WorkflowState.APPLYING_PATCH,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=app_dur_ms,
+                input_summary=f"repair_attempt={repair_idx}, sha={proposal.patch_sha256[:12]}",
+                output_summary=app_rec.output_summary,
+            )
+            run = self.transition_state(
+                run_id,
+                WorkflowState.APPLYING_PATCH,
+                WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                updater=lambda cur: cur.model_copy(
+                    update={"agent_records": [*cur.agent_records, app_rec]}
+                ),
+                reason=f"Replacement patch #{repair_idx} applied; recomputing M01 post-patch impact and scope checks.",
+            )
+
+            # 11. Post-patch M01 impact analysis & approved-test assumption preservation check
+            m01_started = utc_now()
+            m01_t0 = time.perf_counter()
+            new_cb = self.codebase_adapter.analyze(
+                repair_ws_path,
+                source_path=repair_ws_ctx.source_path,
+                base_ref=repair_ws_ctx.effective_base_ref,
+            )
+            m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
+            repair_durations["impact_analysis_ms"] = m01_dur_ms
+
+            if new_cb.status != "completed" or not new_cb.has_relevant_changes:
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                err = new_cb.error or AgentError(
+                    code="POST_PATCH_IMPACT_FAILED",
+                    message=f"Post-patch M01 impact analysis failed on repair attempt #{repair_idx}.",
+                )
+                imp_rec = AgentExecutionRecord(
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=m01_started,
+                    completed_at=utc_now(),
+                    duration_ms=m01_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=err.message,
+                    error=err,
+                )
+                imp_attempt = _make_failed_attempt_record(
+                    outcome="impact_analysis_failed",
+                    gen_res=patch_result,
+                    val_res=validation_result,
+                    app_res=app_result,
+                    errors=[err],
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, imp_attempt]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, imp_rec],
+                        }
+                    ),
+                )
+                if new_consumed >= policy.effective_max_repair_attempts:
+                    return _finalize_to_report(
+                        run,
+                        WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                        history,
+                        RepairTerminationReason.BUDGET_EXHAUSTED,
+                        err.message,
+                        eligibility,
+                    )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    reason="Post-patch impact analysis failed on repair attempt; re-evaluating budget.",
+                )
+                continue
+
+            assumptions_ok, assumption_reasons = check_approved_test_assumptions_preserved(
+                workspace_repo_path=repair_ws_path,
+                source_path=repair_ws_ctx.source_path,
+                initial_codebase_analysis=initial_cb,
+                new_codebase_analysis=new_cb,
+                approved_test_codes=approved_test_codes,
+            )
+            if not assumptions_ok:
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                scope_err = AgentError(
+                    code="TEST_ASSUMPTIONS_INVALIDATED",
+                    message=(
+                        "Replacement patch changed intended scope or invalidated approved test "
+                        "assumptions; stopping automatic repair for fresh human test review: "
+                        + "; ".join(assumption_reasons)
+                    ),
+                    details={"reasons": assumption_reasons},
+                )
+                scope_rec = AgentExecutionRecord(
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=m01_started,
+                    completed_at=utc_now(),
+                    duration_ms=m01_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=scope_err.message,
+                    error=scope_err,
+                )
+                scope_attempt = _make_failed_attempt_record(
+                    outcome="scope_invalidated",
+                    gen_res=patch_result,
+                    val_res=validation_result,
+                    app_res=app_result,
+                    errors=[scope_err],
+                    notes=assumption_reasons,
+                )
+                history = history.model_copy(
+                    update={"attempts": [*history.attempts, scope_attempt]}
+                )
+                run = self.store.update_run_atomic(
+                    run_id,
+                    expected_state=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    updater=lambda cur: cur.model_copy(
+                        update={
+                            "repair_history": history,
+                            "agent_records": [*cur.agent_records, scope_rec],
+                        }
+                    ),
+                )
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    history,
+                    RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
+                    scope_err.message,
+                    eligibility,
+                )
+
+            m01_rec = AgentExecutionRecord(
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=m01_started,
+                completed_at=utc_now(),
+                duration_ms=m01_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"Repair #{repair_idx} post-patch M01 detected "
+                    f"{len(new_cb.changed_files_repo_relative)} changed file(s) and "
+                    f"{len(new_cb.impacted_modules_repo_relative)} impacted module(s); "
+                    "approved test scope & assumptions preserved."
+                ),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=m01_dur_ms,
+                output_summary=m01_rec.output_summary,
+            )
+
+            # 12. Mirror exact Gate-1-approved tests into clean repair workspace (SHA-256 verified)
+            try:
+                mirrored_repair_hashes = mirror_approved_tests_to_workspace(
+                    run.workspace_path,
+                    repair_ws_path,
+                    specs,
+                    selected_ids,
+                )
+            except BaselineTestMirrorError as exc:
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                err = AgentError(code=exc.code, message=exc.message, details=exc.details)
+                return (
+                    self._fail_run(
+                        run_id, WorkflowState.ANALYZING_POST_PATCH_IMPACT, err
+                    ),
+                    last_ver_result,
+                )
+
+            # 13. Validate whether prior baseline evidence can be safely reused, else rerun baseline
+            baseline_reused = self._is_baseline_reusable(
+                policy=policy,
+                baseline_result=active_baseline_result,
+                baseline_snapshot_sha=active_baseline_snapshot_sha,
+                original_snapshot_sha=run.original_source_snapshot_sha256,
+                resolved_base_commit=resolved_base_commit,
+                expected_approved_hashes=mirrored_repair_hashes,
+                repair_workspace_path=repair_ws_path,
+                source_path=repair_ws_ctx.source_path,
+            )
+
+            if baseline_reused:
+                self._log(
+                    run_id=run_id,
+                    agent_name="BaselineComparisonEngine",
+                    stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    status=AgentExecutionStatus.SUCCEEDED,
+                    output_summary=(
+                        "Validated baseline reuse: baseline commit, original source snapshot SHA-256, "
+                        "approved test SHA-256 hashes, and existing regression suite hashes are identical."
+                    ),
+                )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    updater=lambda cur: cur.model_copy(
+                        update={"agent_records": [*cur.agent_records, m01_rec]}
+                    ),
+                    reason=(
+                        f"Validated baseline reused for repair attempt #{repair_idx}; "
+                        "running unchanged approved tests against repaired workspace."
+                    ),
+                )
+            else:
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                    WorkflowState.PREPARING_BASELINE,
+                    updater=lambda cur: cur.model_copy(
+                        update={"agent_records": [*cur.agent_records, m01_rec]}
+                    ),
+                    reason=(
+                        f"Baseline evidence not reusable for repair attempt #{repair_idx}; "
+                        "re-executing baseline verification under identical approved conditions."
+                    ),
+                )
+                rerun_base_path: str | None = None
+                try:
+                    rerun_base_ctx = self.workspace_manager.prepare_baseline_workspace(
+                        f"{run_id}_r{next_attempt}",
+                        run.repository.repository_path,
+                        resolved_base_commit,
+                        source_path=run.repository.source_path,
+                        base_ref=run.repository.base_ref,
+                    )
+                    rerun_base_path = rerun_base_ctx.workspace_repo_path
+                    active_baseline_snapshot_sha = compute_source_snapshot_sha256(
+                        rerun_base_path, rerun_base_ctx.source_path
+                    )
+                    mirror_approved_tests_to_baseline(
+                        repair_ws_path,
+                        rerun_base_path,
+                        specs,
+                        selected_ids,
+                    )
+                    run = self.transition_state(
+                        run_id,
+                        WorkflowState.PREPARING_BASELINE,
+                        WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        reason=f"Re-running baseline verification for repair attempt #{repair_idx}.",
+                    )
+                    b_t0 = time.perf_counter()
+                    rerun_base_res, _rb_agg, rb_int_err = execute_snapshot_verification(
+                        self.verification_adapter,
+                        self.config,
+                        snapshot_role="baseline",
+                        workspace_path=rerun_base_path,
+                        source_path=run.repository.source_path,
+                        selected_test_ids=selected_ids,
+                        approved_specs=specs,
+                        test_purposes=test_purposes,
+                        criterion_ids_by_test=criterion_ids_by_test,
+                        is_trusted_workspace=is_trusted_workspace,
+                        source_snapshot_sha256=active_baseline_snapshot_sha,
+                        baseline_ref=baseline_ref_label,
+                        baseline_commit=resolved_base_commit,
+                    )
+                    repair_durations["baseline_verification_ms"] = int(
+                        (time.perf_counter() - b_t0) * 1000
+                    )
+                    assert isinstance(rerun_base_res, BaselineVerificationResult)
+                    active_baseline_result = rerun_base_res
+                    if rb_int_err is not None:
+                        self.workspace_manager.cleanup_workspace(repair_ws_path)
+                        return (
+                            self._fail_run(
+                                run_id,
+                                WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                                rb_int_err,
+                            ),
+                            last_ver_result,
+                        )
+                    run = self.transition_state(
+                        run_id,
+                        WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                        updater=lambda cur: cur.model_copy(
+                            update={"baseline_verification": active_baseline_result}
+                        ),
+                        reason="Baseline re-verification completed; executing modified verification on repaired workspace.",
+                    )
+                finally:
+                    if self._cleanup_baseline_workspace and rerun_base_path:
+                        try:
+                            self.workspace_manager.cleanup_workspace(rerun_base_path)
+                        except WorkspaceError:
+                            pass
+
+            # 14. Execute unchanged approved verification suite on repaired workspace
+            mod_started = utc_now()
+            mod_t0 = time.perf_counter()
+            new_mod_res, new_ver_res, new_mod_int_err = execute_snapshot_verification(
+                self.verification_adapter,
+                self.config,
+                snapshot_role="modified",
+                workspace_path=repair_ws_path,
+                source_path=repair_ws_ctx.source_path,
+                selected_test_ids=selected_ids,
+                approved_specs=specs,
+                test_purposes=test_purposes,
+                criterion_ids_by_test=criterion_ids_by_test,
+                is_trusted_workspace=is_trusted_workspace,
+                source_snapshot_sha256=app_result.resulting_source_snapshot_sha256,
+                git_diff_sha256=app_result.resulting_git_diff_sha256,
+                baseline_ref=baseline_ref_label,
+                baseline_commit=resolved_base_commit,
+            )
+            mod_dur_ms = int((time.perf_counter() - mod_t0) * 1000)
+            repair_durations["modified_verification_ms"] = mod_dur_ms
+            assert isinstance(new_mod_res, ModifiedVerificationResult)
+
+            if new_mod_int_err is not None:
+                self.workspace_manager.cleanup_workspace(repair_ws_path)
+                return (
+                    self._fail_run(
+                        run_id,
+                        WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                        new_mod_int_err,
+                    ),
+                    last_ver_result,
+                )
+
+            mod_exec_status = (
+                AgentExecutionStatus.TIMEOUT
+                if new_ver_res.verification_outcome == VerificationOutcome.TIMEOUT
+                else (
+                    AgentExecutionStatus.SUCCEEDED
+                    if new_ver_res.execution_status == "completed"
+                    else AgentExecutionStatus.FAILED
+                )
+            )
+            mod_rec = AgentExecutionRecord(
+                agent_name="VerificationAdapter",
+                stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION.value,
+                status=mod_exec_status,
+                started_at=mod_started,
+                completed_at=utc_now(),
+                duration_ms=mod_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"Repair #{repair_idx} modified verification outcome="
+                    f"{new_ver_res.verification_outcome.value}, passed_flag={new_ver_res.verification_passed}, "
+                    f"total={new_ver_res.total_tests}, passed={new_ver_res.passed}, failed={new_ver_res.failed}."
+                ),
+                error=new_ver_res.error,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="VerificationAdapter",
+                stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                status=mod_exec_status,
+                duration_ms=mod_dur_ms,
+                input_summary=f"repair_attempt={repair_idx}, scenarios={selected_ids}",
+                output_summary=mod_rec.output_summary,
+                error=new_ver_res.error,
+            )
+
+            run = self.transition_state(
+                run_id,
+                WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                updater=lambda cur: cur.model_copy(
+                    update={"agent_records": [*cur.agent_records, mod_rec]}
+                ),
+                reason=f"Repair #{repair_idx} modified verification completed; comparing against baseline.",
+            )
+
+            # 15. Compare baseline vs repaired workspace evidence
+            cmp_started = utc_now()
+            cmp_t0 = time.perf_counter()
+            new_comparison = BaselineComparisonEngine.compare(
+                baseline=active_baseline_result,
+                modified=new_mod_res,
+                approved_test_hashes=run.test_review.approved_test_hashes,
+                baseline_ref=baseline_ref_label,
+                baseline_commit=resolved_base_commit,
+                baseline_source_snapshot_sha256=active_baseline_snapshot_sha,
+                modified_source_snapshot_sha256=app_result.resulting_source_snapshot_sha256,
+            )
+            cmp_dur_ms = int((time.perf_counter() - cmp_t0) * 1000)
+            repair_durations["comparison_ms"] = cmp_dur_ms
+            new_ver_res = new_ver_res.model_copy(
+                update={"baseline_comparison": new_comparison}
+            )
+
+            cmp_rec = AgentExecutionRecord(
+                agent_name="BaselineComparisonEngine",
+                stage=WorkflowState.COMPARING_VERIFICATION_RESULTS.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=cmp_started,
+                completed_at=utc_now(),
+                duration_ms=cmp_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=(
+                    f"Repair #{repair_idx} comparison status={new_comparison.status.value}: "
+                    f"preserved={new_comparison.summary.preserved_behavior_count}, "
+                    f"newly_introduced_failures={new_comparison.summary.newly_introduced_failure_count}, "
+                    f"newly_satisfied_acceptance={new_comparison.summary.newly_satisfied_acceptance_count}."
+                ),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="BaselineComparisonEngine",
+                stage=WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=cmp_dur_ms,
+                output_summary=cmp_rec.output_summary,
+            )
+
+            # Build complete attempt record preserving all evidence for this repair attempt
+            rep_failures = list(new_mod_res.failures)
+            if new_mod_res.existing_regression_suite is not None:
+                rep_failures.extend(new_mod_res.existing_regression_suite.failures)
+            rep_errors: list[AgentError] = []
+            if new_mod_res.error is not None:
+                rep_errors.append(new_mod_res.error)
+            rep_passed_clean = bool(
+                new_mod_res.verification_passed
+                and new_comparison.status == VerificationComparisonStatus.COMPLETED
+                and not new_comparison.summary.has_confirmed_regression
+                and (
+                    new_mod_res.existing_regression_suite is None
+                    or new_mod_res.existing_regression_suite.verification_outcome
+                    == VerificationOutcome.PASSED
+                )
+            )
+            new_failure_sig = compute_failure_signature(
+                modified=new_mod_res,
+                comparison=new_comparison,
+            )
+            no_progress_detected = bool(
+                not rep_passed_clean
+                and policy.stop_on_no_progress
+                and new_failure_sig is not None
+                and new_failure_sig in history.seen_failure_signatures
+            )
+
+            rep_attempt = PatchAttemptRecord(
+                attempt_number=next_attempt,
+                attempt_type="repair",
+                repair_attempt_index=repair_idx,
+                original_requirement=run.requirements,
+                acceptance_criterion_ids=sorted(valid_cids),
+                previous_proposal_id=prev_proposal_id,
+                previous_patch_sha256=prev_patch_sha,
+                base_snapshot_sha256=run.original_source_snapshot_sha256,
+                resulting_source_snapshot_sha256=app_result.resulting_source_snapshot_sha256,
+                resulting_git_diff_sha256=app_result.resulting_git_diff_sha256,
+                patch_generation=patch_result,
+                patch_proposal_id=proposal.proposal_id,
+                patch_sha256=proposal.patch_sha256,
+                patch_validation=validation_result,
+                patch_application=app_result,
+                approved_test_ids=list(selected_ids),
+                approved_test_hashes=dict(mirrored_repair_hashes),
+                baseline_reused=baseline_reused,
+                baseline_verification=active_baseline_result,
+                modified_verification=new_mod_res,
+                failure_diagnostics=rep_failures,
+                failure_signature=new_failure_sig,
+                baseline_comparison=new_comparison,
+                repair_eligibility=None,
+                provider_invoked=True,
+                consumed_repair_budget=True,
+                is_deterministic_fixture=patch_result.is_deterministic_fixture,
+                is_mock_output=patch_result.is_mock_output,
+                model_label=patch_result.model_metadata.model_label,
+                durations_ms=repair_durations,
+                started_at=repair_attempt_started,
+                completed_at=utc_now(),
+                outcome="passed" if rep_passed_clean else "failed_verification",
+                errors=rep_errors,
+                notes=(
+                    ["Unchanged failure signature detected; no measurable progress over prior attempt."]
+                    if no_progress_detected
+                    else []
+                ),
+            )
+            new_seen_sigs = list(history.seen_failure_signatures)
+            if new_failure_sig and new_failure_sig not in new_seen_sigs:
+                new_seen_sigs.append(new_failure_sig)
+
+            history = history.model_copy(
+                update={
+                    "attempts": [*history.attempts, rep_attempt],
+                    "seen_failure_signatures": new_seen_sigs,
+                    "final_candidate_attempt_number": next_attempt,
+                    "final_candidate_proposal_id": proposal.proposal_id,
+                    "final_candidate_patch_sha256": proposal.patch_sha256,
+                }
+            )
+
+            # Promote clean repaired workspace as active workspace & clean up superseded copy
+            previous_ws_path = run.workspace_path
+            run = self.transition_state(
+                run_id,
+                WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                updater=lambda cur: cur.model_copy(
+                    update={
+                        "workspace_id": repair_ws_ctx.workspace_id,
+                        "workspace_path": repair_ws_path,
+                        "source_snapshot_sha256": app_result.resulting_source_snapshot_sha256,
+                        "git_diff_sha256": app_result.resulting_git_diff_sha256,
+                        "patch_generation": patch_result,
+                        "patch_proposal_sha256": proposal.patch_sha256,
+                        "patch_attempt_number": next_attempt,
+                        "patch_validation": validation_result,
+                        "patch_application": app_result,
+                        "codebase_analysis": new_cb,
+                        "modified_verification": new_mod_res,
+                        "baseline_comparison": new_comparison,
+                        "verification": new_ver_res,
+                        "repair_history": history,
+                        "agent_records": [*cur.agent_records, cmp_rec],
+                    }
+                ),
+                reason=(
+                    f"Repair attempt #{repair_idx} verified (outcome={new_ver_res.verification_outcome.value}); "
+                    "evaluating repair termination and eligibility."
+                ),
+            )
+            if previous_ws_path and previous_ws_path != repair_ws_path:
+                try:
+                    self.workspace_manager.cleanup_workspace(previous_ws_path)
+                except WorkspaceError:
+                    pass
+
+            last_ver_result = new_ver_res
+            last_modified = new_mod_res
+            last_comparison = new_comparison
+            last_provider_error = None
+
+            if no_progress_detected:
+                no_prog_elig = RepairEligibilityResult(
+                    eligible=False,
+                    category=RepairEligibilityCategory.UNATTRIBUTABLE_FAILURE,
+                    decision_reason=(
+                        f"Repair attempt #{repair_idx} produced an identical failure signature "
+                        f"({new_failure_sig[:12]}) to an earlier attempt with zero measurable progress; "
+                        "stopping automated repair for human review."
+                    ),
+                    blocking_reasons=[
+                        "Unchanged failure signature across distinct repair attempts (no meaningful progress)."
+                    ],
+                    failure_signature=new_failure_sig,
+                    next_attempt_number=None,
+                    remaining_repair_budget=history.remaining_repair_budget,
+                )
+                upd_attempts = list(history.attempts)
+                upd_attempts[-1] = upd_attempts[-1].model_copy(
+                    update={"repair_eligibility": no_prog_elig}
+                )
+                history = history.model_copy(
+                    update={"attempts": upd_attempts, "last_eligibility": no_prog_elig}
+                )
+                return _finalize_to_report(
+                    run,
+                    WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+                    history,
+                    RepairTerminationReason.NO_PROGRESS_DETECTED,
+                    no_prog_elig.decision_reason,
+                    no_prog_elig,
+                )
+
+        # Fallback safety net (structurally unreachable unless loop guard hit)
+        return _finalize_to_report(
+            run,
+            WorkflowState.EVALUATING_REPAIR_ELIGIBILITY,
+            history,
+            RepairTerminationReason.BUDGET_EXHAUSTED,
+            "Bounded repair loop reached its configured maximum iteration bound.",
+            history.last_eligibility,
         )
 
     def _build_criterion_traceability(
@@ -3679,6 +5665,13 @@ class OrchestratorService:
             else "incomplete"
         )
         patch_gen = run.patch_generation
+        any_fixture_attempt = bool(
+            run.repair_history is not None
+            and any(
+                att.is_deterministic_fixture or att.is_mock_output
+                for att in run.repair_history.attempts
+            )
+        )
         req_verification_proven = bool(
             mandatory_coverage_complete
             and verification.verification_passed
@@ -3694,6 +5687,12 @@ class OrchestratorService:
                     and not patch_gen.is_mock_output
                 )
             )
+            and not any_fixture_attempt
+            and run.repair_termination_reason
+            not in {
+                RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
+                RepairTerminationReason.TEST_MODIFICATION_REJECTED,
+            }
         )
 
         unverified_reqs = []
@@ -3747,6 +5746,33 @@ class OrchestratorService:
             "patch_applied": (
                 run.patch_application.applied
                 if run.patch_application is not None
+                else None
+            ),
+            "repair_enabled": (
+                run.repair_policy.enabled if run.repair_policy is not None else None
+            ),
+            "max_repair_attempts": (
+                run.repair_policy.max_repair_attempts
+                if run.repair_policy is not None
+                else None
+            ),
+            "repair_attempts_consumed": run.repair_attempts_consumed,
+            "remaining_repair_budget": (
+                run.repair_history.remaining_repair_budget
+                if run.repair_history is not None
+                else (
+                    max(
+                        0,
+                        run.repair_policy.effective_max_repair_attempts
+                        - run.repair_attempts_consumed,
+                    )
+                    if run.repair_policy is not None
+                    else None
+                )
+            ),
+            "repair_termination_reason": (
+                run.repair_termination_reason.value
+                if run.repair_termination_reason is not None
                 else None
             ),
             "requirement_traceability_status": req_traceability_status,
@@ -3822,13 +5848,30 @@ class OrchestratorService:
         complete_assurance = bool(traceability.get("requirement_verification_proven", False))
         outcome = verification.verification_outcome
 
-        if has_confirmed_regression:
+        if run.repair_termination_reason in {
+            RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
+            RepairTerminationReason.TEST_MODIFICATION_REJECTED,
+        }:
+            recommendation = "needs_review"
+            recommendation_label = "additional_review_required"
+            recommendation_summary = (
+                f"Bounded automated patch repair stopped ({run.repair_termination_reason.value}): "
+                f"{run.repair_history.termination_summary if run.repair_history else 'Fresh human review required.'} "
+                "Ordinary approval is blocked; perform fresh human test and patch review."
+            )
+        elif has_confirmed_regression:
             recommendation = "reject"
             recommendation_label = "verification_failed"
+            repair_clause = (
+                f" Bounded repair ended with '{run.repair_termination_reason.value}' after "
+                f"{run.repair_attempts_consumed} repair attempt(s)."
+                if run.repair_termination_reason is not None
+                else ""
+            )
             recommendation_summary = (
                 "Confirmed newly introduced regression(s) detected against baseline "
-                f"({', '.join(comparison.summary.newly_introduced_failures)}). "
-                "Ordinary approval is blocked; inspect baseline-vs-modified comparison and failure diagnostics."
+                f"({', '.join(comparison.summary.newly_introduced_failures)}).{repair_clause} "
+                "Ordinary approval is blocked; inspect baseline-vs-modified comparison, attempt history, and failure diagnostics."
             )
         elif verification.verification_passed and outcome == VerificationOutcome.PASSED:
             recommendation = "needs_review"
@@ -3845,6 +5888,14 @@ class OrchestratorService:
                     f" Tests were produced by offline mock/stub model '{gen.model_label}' "
                     "(is_mock_output=True), not a live LLM."
                     if gen is not None and gen.is_mock_output
+                    else ""
+                )
+                repair_clause = (
+                    f" Bounded automated patch repair succeeded on attempt #{run.patch_attempt_number} "
+                    f"({run.repair_attempts_consumed} repair attempt(s) consumed) against the unchanged "
+                    "Gate-1-approved test suite; human final review remains mandatory."
+                    if run.repair_termination_reason
+                    == RepairTerminationReason.REPAIR_SUCCEEDED
                     else ""
                 )
                 comparison_clause = (
@@ -3867,7 +5918,7 @@ class OrchestratorService:
                     "All approved generated tests passed against the modified working copy. "
                     "Ready for human review; passing generated tests alone is not proof of "
                     f"full requirement verification, regression safety, or production readiness."
-                    f"{comparison_clause}{assurance_clause}{mock_clause}"
+                    f"{repair_clause}{comparison_clause}{assurance_clause}{mock_clause}"
                 )
         elif outcome == VerificationOutcome.FAILED_TESTS:
             recommendation = "reject"
@@ -3917,8 +5968,21 @@ class OrchestratorService:
                 "Pre-change M01 codebase context was limited to static AST indexing; full reverse-dependency impact analysis ran post-patch."
             )
             limitations.append(
-                "Independent adversarial review (A6), bounded automated repair loops, and code coverage measurement are not executed in this M02 MVP."
+                "Independent adversarial review (A6) and code coverage measurement are not executed in this M02 MVP."
             )
+            if run.repair_history is not None:
+                if run.repair_history.termination_reason == RepairTerminationReason.PROVIDER_UNAVAILABLE:
+                    limitations.append(
+                        "Production A4 repair provider was unavailable during bounded repair; no automatic fallback to mock output occurred."
+                    )
+                elif any(
+                    att.is_deterministic_fixture or att.is_mock_output
+                    for att in run.repair_history.attempts
+                ):
+                    limitations.append(
+                        "Patch generation and/or bounded repair attempts used an offline deterministic fixture "
+                        "(is_deterministic_fixture=True), NOT actual AI self-repair results."
+                    )
             if run.patch_generation is not None and (
                 run.patch_generation.is_deterministic_fixture
                 or run.patch_generation.is_mock_output
@@ -4000,6 +6064,53 @@ class OrchestratorService:
                 if run.patch_application is not None
                 else None
             ),
+            repair_enabled=(
+                run.repair_policy.enabled if run.repair_policy is not None else None
+            ),
+            max_repair_attempts=(
+                run.repair_policy.max_repair_attempts
+                if run.repair_policy is not None
+                else None
+            ),
+            repair_attempts_consumed=run.repair_attempts_consumed,
+            current_attempt_number=(
+                run.repair_history.current_attempt_number
+                if run.repair_history is not None
+                and run.repair_history.current_attempt_number > 0
+                else run.patch_attempt_number
+            ),
+            remaining_repair_budget=(
+                run.repair_history.remaining_repair_budget
+                if run.repair_history is not None
+                else (
+                    max(
+                        0,
+                        run.repair_policy.effective_max_repair_attempts
+                        - run.repair_attempts_consumed,
+                    )
+                    if run.repair_policy is not None
+                    else None
+                )
+            ),
+            repair_eligibility=run.repair_eligibility,
+            repair_termination_reason=run.repair_termination_reason,
+            repair_history=run.repair_history,
+            final_candidate_proposal_id=(
+                run.repair_history.final_candidate_proposal_id
+                if run.repair_history is not None
+                else (
+                    run.patch_generation.proposal.proposal_id
+                    if run.patch_generation is not None
+                    and run.patch_generation.proposal is not None
+                    else None
+                )
+            ),
+            final_candidate_patch_sha256=(
+                run.repair_history.final_candidate_patch_sha256
+                if run.repair_history is not None
+                else run.patch_proposal_sha256
+            ),
+            final_verification_outcome=verification.verification_outcome,
             original_source_snapshot_sha256=run.original_source_snapshot_sha256,
             baseline_source_snapshot_sha256=run.baseline_source_snapshot_sha256,
             resulting_source_snapshot_sha256=run.source_snapshot_sha256,
@@ -4101,6 +6212,20 @@ class OrchestratorService:
                             active_comparison.summary.newly_introduced_failures
                         ),
                         "comparison_status": active_comparison.status.value,
+                    },
+                    run_id=run_id,
+                )
+            if run.repair_termination_reason in {
+                RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
+                RepairTerminationReason.TEST_MODIFICATION_REJECTED,
+            }:
+                raise ReviewConflictError(
+                    "Cannot approve a change package after bounded repair terminated due to "
+                    f"'{run.repair_termination_reason.value}'. Submit 'needs_review' or 'reject' "
+                    "and perform fresh test review instead.",
+                    code="REPAIR_REVIEW_REQUIRED",
+                    details={
+                        "repair_termination_reason": run.repair_termination_reason.value
                     },
                     run_id=run_id,
                 )

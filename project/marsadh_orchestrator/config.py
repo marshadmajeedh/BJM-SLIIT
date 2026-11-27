@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from project.schemas.repair import RepairPolicy
 from project.schemas.workflow import ExecutionMode
 
 
@@ -44,6 +45,7 @@ class OrchestratorConfig(BaseModel):
     execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST
     groq_model: str | None = Field(default=None, max_length=160)
     groq_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+    auto_repair_enabled: bool = True
     max_repair_attempts: int = Field(default=2, ge=0, le=2)
     max_patch_size_bytes: int = Field(default=100_000, ge=1024, le=1_000_000)
     max_patch_changed_files: int = Field(default=10, ge=1, le=50)
@@ -166,6 +168,24 @@ class OrchestratorConfig(BaseModel):
         data["groq_api_key_configured"] = bool(self.get_groq_api_key())
         return data
 
+    def build_repair_policy(
+        self,
+        *,
+        enabled_override: bool | None = None,
+        max_repair_attempts_override: int | None = None,
+    ) -> RepairPolicy:
+        """Build a validated bounded RepairPolicy from server config and optional overrides."""
+        enabled = self.auto_repair_enabled if enabled_override is None else enabled_override
+        max_attempts = (
+            self.max_repair_attempts
+            if max_repair_attempts_override is None
+            else max_repair_attempts_override
+        )
+        return RepairPolicy(
+            enabled=enabled,
+            max_repair_attempts=max_attempts,
+        )
+
     @classmethod
     def from_env(
         cls,
@@ -206,6 +226,16 @@ class OrchestratorConfig(BaseModel):
             kwargs["groq_model"] = source["GROQ_MODEL"].strip()
         if source.get("GROQ_API_KEY"):
             kwargs["groq_api_key"] = SecretStr(source["GROQ_API_KEY"].strip())
+        if source.get("CHANGEGUARD_AUTO_REPAIR_ENABLED") is not None:
+            raw_flag = source["CHANGEGUARD_AUTO_REPAIR_ENABLED"].strip().lower()
+            if raw_flag in {"1", "true", "yes", "on"}:
+                kwargs["auto_repair_enabled"] = True
+            elif raw_flag in {"0", "false", "no", "off"}:
+                kwargs["auto_repair_enabled"] = False
+            else:
+                raise ValueError(
+                    f"Invalid CHANGEGUARD_AUTO_REPAIR_ENABLED value: '{source['CHANGEGUARD_AUTO_REPAIR_ENABLED']}'"
+                )
         if source.get("CHANGEGUARD_MAX_REPAIR_ATTEMPTS"):
             kwargs["max_repair_attempts"] = int(
                 source["CHANGEGUARD_MAX_REPAIR_ATTEMPTS"]

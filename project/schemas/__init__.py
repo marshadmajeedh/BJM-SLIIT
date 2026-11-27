@@ -41,6 +41,16 @@ from .patch import (
     PreChangeFileSummary,
     compute_patch_sha256,
 )
+from .repair import (
+    PatchAttemptOutcome,
+    PatchAttemptRecord,
+    PatchAttemptType,
+    RepairAttemptHistory,
+    RepairEligibilityCategory,
+    RepairEligibilityResult,
+    RepairPolicy,
+    RepairTerminationReason,
+)
 from .requirements import (
     AcceptanceCriterion,
     AmbiguitySeverity,
@@ -96,6 +106,9 @@ __all__ = [
     "IndividualTestOutcome",
     "ModifiedVerificationResult",
     "PatchApplicationResult",
+    "PatchAttemptOutcome",
+    "PatchAttemptRecord",
+    "PatchAttemptType",
     "PatchFileChange",
     "PatchGenerationRequest",
     "PatchGenerationResult",
@@ -105,6 +118,11 @@ __all__ = [
     "PreChangeCodebaseContext",
     "PreChangeFileSummary",
     "RegressionComparisonSummary",
+    "RepairAttemptHistory",
+    "RepairEligibilityCategory",
+    "RepairEligibilityResult",
+    "RepairPolicy",
+    "RepairTerminationReason",
     "RepositoryInfo",
     "RequirementAmbiguity",
     "RequirementAnalysisResult",

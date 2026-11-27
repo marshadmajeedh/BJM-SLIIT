@@ -32,7 +32,7 @@ from project.schemas import (
 )
 
 
-def test_workflow_states_match_mvp_contract_without_patch_repair() -> None:
+def test_workflow_states_match_m02_contract_with_bounded_patch_repair() -> None:
     expected = {
         "CREATED",
         "ANALYZING_REQUIREMENTS",
@@ -48,6 +48,8 @@ def test_workflow_states_match_mvp_contract_without_patch_repair() -> None:
         "RUNNING_BASELINE_VERIFICATION",
         "RUNNING_MODIFIED_VERIFICATION",
         "COMPARING_VERIFICATION_RESULTS",
+        "EVALUATING_REPAIR_ELIGIBILITY",
+        "REPAIRING_PATCH",
         "RUNNING_VERIFICATION",
         "COMPILING_REPORT",
         "AWAITING_FINAL_APPROVAL",
@@ -59,7 +61,8 @@ def test_workflow_states_match_mvp_contract_without_patch_repair() -> None:
     }
     actual = {state.value for state in WorkflowState}
     assert actual == expected
-    assert "REPAIRING_PATCH" not in actual
+    assert "EVALUATING_REPAIR_ELIGIBILITY" in actual
+    assert "REPAIRING_PATCH" in actual
 
 
 def test_create_run_request_defaults_and_validation() -> None:

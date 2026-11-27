@@ -69,6 +69,8 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `RUNNING_BASELINE_VERIFICATION` | Active | Executing identical approved tests (+ existing repo regression suite if present) on baseline commit | Poll `GET /api/runs/{run_id}` |
 | `RUNNING_MODIFIED_VERIFICATION` | Active | Executing identical approved tests (+ existing repo regression suite if present) on modified workspace | Poll `GET /api/runs/{run_id}` |
 | `COMPARING_VERIFICATION_RESULTS` | Active | Deterministic baseline-vs-modified comparison & regression classification | Poll `GET /api/runs/{run_id}` |
+| `EVALUATING_REPAIR_ELIGIBILITY` | Active | (`generate_and_verify_change`) Conservative deterministic evaluation of whether verification failures are attributable to the proposed patch and eligible for bounded repair | Poll `GET /api/runs/{run_id}` |
+| `REPAIRING_PATCH` | Active | (`generate_and_verify_change`) Requesting a bounded replacement unified diff against the immutable original snapshot via injectable A4 `PatchGenerationAdapter` (max 2 repair attempts / 3 total proposals) | Poll `GET /api/runs/{run_id}` |
 | `RUNNING_VERIFICATION` | Active *(legacy)* | Legacy verification state retained for backward compatibility | Poll `GET /api/runs/{run_id}` |
 | `COMPILING_REPORT` | Active | Aggregating auditable `ChangePackageReport` | Poll `GET /api/runs/{run_id}` |
 | `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render baseline comparison, evidence, risk, limitations, logs; enable `POST /decision` |
@@ -79,12 +81,12 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `FAILED` | Terminal | Unrecoverable adapter, workspace, patch safety, missing A4, ambiguity block, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
 
 ### Polling Recommendations
-- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `PREPARING_BASELINE`, `RUNNING_BASELINE_VERIFICATION`, `RUNNING_MODIFIED_VERIFICATION`, `COMPARING_VERIFICATION_RESULTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
+- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `PREPARING_BASELINE`, `RUNNING_BASELINE_VERIFICATION`, `RUNNING_MODIFIED_VERIFICATION`, `COMPARING_VERIFICATION_RESULTS`, `EVALUATING_REPAIR_ELIGIBILITY`, `REPAIRING_PATCH`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
 - **Stop polling immediately** when `state` enters `AWAITING_TEST_REVIEW`, `AWAITING_FINAL_APPROVAL`, or any terminal state (`COMPLETED_NO_CHANGES`, `APPROVED`, `REJECTED`, `NEEDS_REVIEW`, `FAILED`).
 - Use `allowed_actions` from `GET /api/runs/{run_id}` to enable/disable buttons cleanly:
   - `["submit_test_review"]` -> enable Gate 1 approval/rejection controls.
   - `["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]` -> enable all Gate 2 buttons.
-  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, a confirmed newly introduced regression was detected against baseline, mandatory unresolved requirement ambiguities remain open, or a `generate_and_verify_change` run lacks applied patch evidence).
+  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, a confirmed newly introduced regression was detected against baseline, mandatory unresolved requirement ambiguities remain open, bounded repair terminated due to `test_modification_rejected` or `test_assumptions_invalidated`, or a `generate_and_verify_change` run lacks applied patch evidence).
 
 ---
 
@@ -120,6 +122,8 @@ Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` 
   "live_llm_configured": false,
   "groq_model": null,
   "patch_generator_configured": false,
+  "auto_repair_enabled": true,
+  "max_repair_attempts": 2,
   "supported_workflow_modes": ["verify_existing_change", "generate_and_verify_change"],
   "verification_dependencies_available": true,
   "git_available": true,
@@ -146,7 +150,7 @@ Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` 
   "execution_mode": "offline_test"
 }
 ```
-> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`. `workflow_mode` defaults to `"verify_existing_change"` for backward compatibility; pass `"generate_and_verify_change"` for clean-repository patch generation workflows.
+> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`. `workflow_mode` defaults to `"verify_existing_change"` for backward compatibility; pass `"generate_and_verify_change"` for clean-repository patch generation workflows. Optional fields `repair_enabled` (`bool | null`) and `max_repair_attempts` (`0..2 | null`) override the server repair policy for `generate_and_verify_change` runs (`verify_existing_change` never performs automatic repair). See [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md).
 
 **Example Response (`202 Accepted` — `CreateRunResponse`):**
 ```json
@@ -527,7 +531,7 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 | :--- | :--- | :--- |
 | `403 Forbidden` | Repository path or ID outside server allowlist | `REPOSITORY_ACCESS_DENIED` |
 | `404 Not Found` | Unknown workflow `run_id` | `RUN_NOT_FOUND` |
-| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `BASELINE_WORKSPACE_TAMPERED`, `VERIFICATION_APPROVAL_BLOCKED`, `REGRESSION_APPROVAL_BLOCKED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
+| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `BASELINE_WORKSPACE_TAMPERED`, `VERIFICATION_APPROVAL_BLOCKED`, `REGRESSION_APPROVAL_BLOCKED`, `REPAIR_REVIEW_REQUIRED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
 | `422 Unprocessable Content` | Invalid request DTO or unknown scenario ID for run | `VALIDATION_ERROR`, `UNKNOWN_SCENARIO_ID` |
 | `503 Service Unavailable` | Database or required local infrastructure failure | `INFRASTRUCTURE_UNAVAILABLE` |
 | `500 Internal Server Error` | Unexpected server error (safe generic message) | `INTERNAL_SERVER_ERROR` |
@@ -554,5 +558,5 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 1. **In-process background execution:** Runs execute in a single-process bounded thread pool (not Redis/Celery). Process restarts mark interrupted active runs as `FAILED` without replaying external LLM calls or pytest; paused human-review runs remain resumable.
 2. **No OS/container sandbox:** Git workspace isolation is not an OS security sandbox. Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled.
 3. **No authentication layer:** Reviewer labels are unauthenticated local metadata.
-4. **A4 patch generation agent unimplemented (integration infrastructure ready):** `PatchGenerationAdapter` and controlled patch validation/application are ready for dependency injection of the future teammate-owned A4 agent (`PATCH_GENERATOR_UNAVAILABLE` until connected); `max_repair_attempts` remains reserved.
+4. **A4 patch generation agent unimplemented (integration & bounded repair infrastructure ready):** `PatchGenerationAdapter`, controlled patch validation/application, and bounded automated repair orchestration (max 2 repair attempts / 3 total proposals; see [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md)) are ready for dependency injection of the future teammate-owned A4 agent (`PATCH_GENERATOR_UNAVAILABLE` until connected; live mode never falls back to offline fixtures).
 5. **M04 itemized test-node reporting, coverage, and AI root-cause analysis remain limited:** Baseline-versus-modified verification comparison is implemented in M02 (`docs/m02/BASELINE_VERIFICATION_INTEGRATION.md`), but unmodified M04 `report_parser.py` omits individual passed pytest node IDs; code coverage and AI root-cause analysis remain explicitly reported as `unavailable` rather than fabricated.

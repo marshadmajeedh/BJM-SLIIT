@@ -28,6 +28,7 @@ from .requirements import (
     BusinessConstraint,
     RequirementAmbiguity,
 )
+from .verification import FailureDiagnostic
 
 
 def compute_patch_sha256(unified_diff: str) -> str:
@@ -267,7 +268,18 @@ class PatchGenerationRequest(BaseModel):
     relevant_source_files: dict[str, str] = Field(default_factory=dict)
     relevant_source_file_paths: list[str] = Field(default_factory=list)
     attempt_number: int = Field(default=1, ge=1, le=10)
+    attempt_type: Literal["initial", "repair"] = "initial"
+    repair_attempt_number: int = Field(default=0, ge=0, le=2)
     execution_mode: Literal["offline_test", "live_llm"] = "offline_test"
+    previous_proposal_id: str | None = Field(
+        default=None, pattern=STABLE_ID_PATTERN.pattern
+    )
+    previous_proposed_patch: str | None = None
+    previous_patch_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    prior_patch_hashes: list[str] = Field(default_factory=list)
+    failure_diagnostics: list[FailureDiagnostic] = Field(default_factory=list)
+    baseline_comparison_evidence: dict[str, Any] | None = None
+    failed_criterion_ids: list[str] = Field(default_factory=list)
     previous_verification_evidence: dict[str, Any] | None = None
 
     @field_validator("original_requirement", "repository_snapshot_ref")
@@ -284,12 +296,37 @@ class PatchGenerationRequest(BaseModel):
         normalized = [p.strip().replace("\\", "/") for p in value if p and p.strip()]
         return _validate_unique_text_list(normalized, field_name="paths")
 
+    @field_validator("failed_criterion_ids")
+    @classmethod
+    def _validate_failed_criterion_ids(cls, value: list[str]) -> list[str]:
+        return _validate_unique_id_list(value, field_name="failed_criterion_ids")
+
     @model_validator(mode="after")
     def _sync_relevant_source_file_paths(self) -> PatchGenerationRequest:
         if self.relevant_source_files and not self.relevant_source_file_paths:
             self.relevant_source_file_paths = sorted(
                 k.replace("\\", "/") for k in self.relevant_source_files
             )
+        if self.attempt_type == "initial":
+            if self.repair_attempt_number != 0:
+                raise ValueError(
+                    "Initial patch generation request must have repair_attempt_number=0"
+                )
+        else:
+            if self.attempt_number < 2:
+                raise ValueError(
+                    "Repair patch generation request must have attempt_number >= 2"
+                )
+            if self.repair_attempt_number != self.attempt_number - 1:
+                raise ValueError(
+                    "Repair patch generation request must have "
+                    "repair_attempt_number == attempt_number - 1"
+                )
+            if not self.previous_patch_sha256 or not self.previous_proposed_patch:
+                raise ValueError(
+                    "Repair patch generation request requires previous_proposed_patch "
+                    "and previous_patch_sha256"
+                )
         return self
 
 
