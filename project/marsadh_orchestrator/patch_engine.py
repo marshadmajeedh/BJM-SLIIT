@@ -78,10 +78,27 @@ _PROTECTED_EXACT_PATHS: frozenset[str] = frozenset(
         ".gitattributes",
         ".pre-commit-config.yaml",
         "pyproject.toml",
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
         "setup.py",
         "setup.cfg",
         "makefile",
         "dockerfile",
+    }
+)
+
+_EXECUTION_CONFIG_AND_HOOK_FILENAMES: frozenset[str] = frozenset(
+    {
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
+        "conftest.py",
+        "sitecustomize.py",
+        "usercustomize.py",
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
     }
 )
 
@@ -100,6 +117,12 @@ _PROTECTED_FILENAMES: frozenset[str] = frozenset(
         "secrets.yaml",
         "secrets.yml",
         "secrets.py",
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
+        "conftest.py",
+        "sitecustomize.py",
+        "usercustomize.py",
     }
 )
 
@@ -110,6 +133,7 @@ _PROTECTED_EXTENSIONS: tuple[str, ...] = (
     ".pfx",
     ".jks",
     ".kdbx",
+    ".pth",
 )
 
 
@@ -894,17 +918,20 @@ class PatchValidator:
                         norm_p in normalized_forbidden
                         or ".changeguard_generated_tests" in parts_lower
                         or "tests" in parts_lower
+                        or "test" in parts_lower[:-1]
                         or fname_lower.startswith("test_")
                         or fname_lower.endswith("_test.py")
-                        or fname_lower == "conftest.py"
+                        or fname_lower in _EXECUTION_CONFIG_AND_HOOK_FILENAMES
+                        or fname_lower.endswith(".pth")
                     )
                     if is_test_artifact:
                         violations.append(
                             AgentError(
                                 code="PATCH_TEST_MODIFICATION_FORBIDDEN",
                                 message=(
-                                    "Patch rejected: modifying approved verification tests or "
-                                    f"established regression test suites is forbidden ('{norm_p}')."
+                                    "Patch rejected: modifying approved verification tests, "
+                                    "established regression test suites, pytest/execution config, "
+                                    f"or Python import hooks is forbidden ('{norm_p}')."
                                 ),
                                 details={"path": norm_p},
                             )

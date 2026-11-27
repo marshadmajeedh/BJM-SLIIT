@@ -74,6 +74,62 @@ def _validate_unique_text_list(values: list[str], *, field_name: str) -> list[st
     return cleaned_list
 
 
+class PreChangeFunctionMetadata(BaseModel):
+    """Structured AST metadata for a function or method discovered by M01."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=300)
+    line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    kind: Literal["function", "method", "async_function"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_line_bounds(self) -> PreChangeFunctionMetadata:
+        if self.line is not None and self.end_line is not None and self.end_line < self.line:
+            raise ValueError("end_line must be greater than or equal to line")
+        return self
+
+
+class PreChangeClassMetadata(BaseModel):
+    """Structured AST metadata for a class discovered by M01."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=300)
+    line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_line_bounds(self) -> PreChangeClassMetadata:
+        if self.line is not None and self.end_line is not None and self.end_line < self.line:
+            raise ValueError("end_line must be greater than or equal to line")
+        return self
+
+
+class PreChangeImportMetadata(BaseModel):
+    """Structured AST metadata for an import discovered by M01."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(default="", max_length=300)
+    line: int | None = Field(default=None, ge=1)
+    kind: Literal["absolute", "relative"] | None = None
+    level: int | None = Field(default=None, ge=0, le=64)
+
+    @model_validator(mode="after")
+    def _validate_import_identity(self) -> PreChangeImportMetadata:
+        if not self.name and not (self.level is not None and self.level > 0):
+            raise ValueError(
+                "Import metadata requires a non-empty name or a positive relative import level"
+            )
+        if self.kind == "absolute" and self.level is not None and self.level > 0:
+            raise ValueError("Absolute import metadata cannot have a positive level")
+        if self.kind == "relative" and self.level is not None and self.level == 0:
+            raise ValueError("Relative import metadata cannot have level=0")
+        return self
+
+
 class PreChangeFileSummary(BaseModel):
     """Static AST summary of a single indexed Python file before patch generation."""
 
@@ -84,6 +140,10 @@ class PreChangeFileSummary(BaseModel):
     functions: list[str] = Field(default_factory=list)
     classes: list[str] = Field(default_factory=list)
     imports: list[str] = Field(default_factory=list)
+    function_metadata: list[PreChangeFunctionMetadata] = Field(default_factory=list)
+    class_metadata: list[PreChangeClassMetadata] = Field(default_factory=list)
+    import_metadata: list[PreChangeImportMetadata] = Field(default_factory=list)
+    metadata_warnings: list[str] = Field(default_factory=list)
     parse_error: str | None = Field(default=None, max_length=1000)
 
 

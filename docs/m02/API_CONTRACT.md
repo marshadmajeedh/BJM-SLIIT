@@ -71,22 +71,24 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `COMPARING_VERIFICATION_RESULTS` | Active | Deterministic baseline-vs-modified comparison & regression classification | Poll `GET /api/runs/{run_id}` |
 | `EVALUATING_REPAIR_ELIGIBILITY` | Active | (`generate_and_verify_change`) Conservative deterministic evaluation of whether verification failures are attributable to the proposed patch and eligible for bounded repair | Poll `GET /api/runs/{run_id}` |
 | `REPAIRING_PATCH` | Active | (`generate_and_verify_change`) Requesting a bounded replacement unified diff against the immutable original snapshot via injectable A4 `PatchGenerationAdapter` (max 2 repair attempts / 3 total proposals) | Poll `GET /api/runs/{run_id}` |
+| `RUNNING_INDEPENDENT_REVIEW` | Active | Invoking injectable A6 `IndependentReviewAdapter` against the frozen final candidate evidence (after verification and any bounded repair complete) | Poll `GET /api/runs/{run_id}` |
+| `RECONCILING_REVIEW_EVIDENCE` | Active | Deterministic reconciliation of verification, baseline comparison, traceability, candidate integrity, repair history, and A6 independent review findings | Poll `GET /api/runs/{run_id}` |
 | `RUNNING_VERIFICATION` | Active *(legacy)* | Legacy verification state retained for backward compatibility | Poll `GET /api/runs/{run_id}` |
 | `COMPILING_REPORT` | Active | Aggregating auditable `ChangePackageReport` | Poll `GET /api/runs/{run_id}` |
-| `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render baseline comparison, evidence, risk, limitations, logs; enable `POST /decision` |
+| `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render baseline comparison, independent review, reconciliation, evidence, risk, limitations, logs; enable `POST /decision` |
 | `COMPLETED_NO_CHANGES` | Terminal | (`verify_existing_change`) Zero tracked Python changes found; M03 & M04 skipped (**not verification proof**) | Display informational notice; stop polling |
 | `APPROVED` | Terminal | Final human approval recorded (**no Git commit/merge/push performed**) | Display decision badge; stop polling |
 | `REJECTED` | Terminal | Rejected at Gate 1 (tests) or Gate 2 (change package) | Display rejection notes; stop polling |
-| `NEEDS_REVIEW` | Terminal | Escalated for manual investigation (e.g., failed/incomplete verification) | Display escalation comments; stop polling |
+| `NEEDS_REVIEW` | Terminal | Escalated for manual investigation (e.g., failed/incomplete verification or unresolved reviewer disagreement) | Display escalation comments; stop polling |
 | `FAILED` | Terminal | Unrecoverable adapter, workspace, patch safety, missing A4, ambiguity block, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
 
 ### Polling Recommendations
-- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `PREPARING_BASELINE`, `RUNNING_BASELINE_VERIFICATION`, `RUNNING_MODIFIED_VERIFICATION`, `COMPARING_VERIFICATION_RESULTS`, `EVALUATING_REPAIR_ELIGIBILITY`, `REPAIRING_PATCH`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
+- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `PREPARING_BASELINE`, `RUNNING_BASELINE_VERIFICATION`, `RUNNING_MODIFIED_VERIFICATION`, `COMPARING_VERIFICATION_RESULTS`, `EVALUATING_REPAIR_ELIGIBILITY`, `REPAIRING_PATCH`, `RUNNING_INDEPENDENT_REVIEW`, `RECONCILING_REVIEW_EVIDENCE`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
 - **Stop polling immediately** when `state` enters `AWAITING_TEST_REVIEW`, `AWAITING_FINAL_APPROVAL`, or any terminal state (`COMPLETED_NO_CHANGES`, `APPROVED`, `REJECTED`, `NEEDS_REVIEW`, `FAILED`).
 - Use `allowed_actions` from `GET /api/runs/{run_id}` to enable/disable buttons cleanly:
   - `["submit_test_review"]` -> enable Gate 1 approval/rejection controls.
   - `["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]` -> enable all Gate 2 buttons.
-  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, a confirmed newly introduced regression was detected against baseline, mandatory unresolved requirement ambiguities remain open, bounded repair terminated due to `test_modification_rejected` or `test_assumptions_invalidated`, or a `generate_and_verify_change` run lacks applied patch evidence).
+  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, a confirmed newly introduced regression was detected against baseline, candidate/review evidence integrity fails, mandatory unresolved requirement ambiguities remain open, bounded repair terminated due to `test_modification_rejected` or `test_assumptions_invalidated`, a `generate_and_verify_change` run lacks applied patch evidence, an independent reviewer raised an unresolved material disagreement or `reject` recommendation, or `require_independent_review=true` is enabled while independent review is unavailable or returned `needs_review`).
 
 ---
 
@@ -122,6 +124,8 @@ Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` 
   "live_llm_configured": false,
   "groq_model": null,
   "patch_generator_configured": false,
+  "independent_reviewer_configured": false,
+  "require_independent_review": false,
   "auto_repair_enabled": true,
   "max_repair_attempts": 2,
   "supported_workflow_modes": ["verify_existing_change", "generate_and_verify_change"],
@@ -130,6 +134,7 @@ Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` 
   "configured_repository_ids": ["mini-pos-demo"],
   "execution_model": "in_process_bounded_threadpool",
   "limitations": [
+    "Local unauthenticated API: no authentication or authorization layer is enforced; expose on loopback (127.0.0.1) only.",
     "Background workflow stages execute in a single-process bounded thread pool (not a durable distributed queue).",
     "Untrusted repository execution is disabled; pytest runs only inside server-trusted roots.",
     "Reviewer labels are local MVP metadata and do not represent authenticated user identities.",
@@ -150,7 +155,7 @@ Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` 
   "execution_mode": "offline_test"
 }
 ```
-> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`. `workflow_mode` defaults to `"verify_existing_change"` for backward compatibility; pass `"generate_and_verify_change"` for clean-repository patch generation workflows. Optional fields `repair_enabled` (`bool | null`) and `max_repair_attempts` (`0..2 | null`) override the server repair policy for `generate_and_verify_change` runs (`verify_existing_change` never performs automatic repair). See [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md).
+> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`. `workflow_mode` defaults to `"verify_existing_change"` for backward compatibility; pass `"generate_and_verify_change"` for clean-repository patch generation workflows. Optional fields `repair_enabled` (`bool | null`), `max_repair_attempts` (`0..2 | null`), and `require_independent_review` (`bool | null`) override the server policy for the run (`verify_existing_change` never performs automatic repair). See [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md) and [`INDEPENDENT_REVIEW_INTEGRATION.md`](./INDEPENDENT_REVIEW_INTEGRATION.md).
 
 **Example Response (`202 Accepted` — `CreateRunResponse`):**
 ```json
@@ -273,7 +278,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
     "file_impacts": [],
     "error": null,
     "assumptions": [
-      "M01 static reverse-dependency analysis resolves absolute Python imports only; dynamic or relative imports may not appear."
+      "M01 static reverse-dependency analysis resolves static absolute and relative Python imports via AST; dynamic imports or runtime sys.path dependencies may not appear."
     ]
   },
   "test_generation": {
@@ -508,8 +513,20 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
 ```
 - Approving when verification failed, timed out, had collection/zero-test errors, or was unavailable returns `409 Conflict` (`code: "VERIFICATION_APPROVAL_BLOCKED"`).
 - Approving when baseline-versus-modified comparison confirmed a newly introduced mandatory regression (including in an existing repository regression suite) returns `409 Conflict` (`code: "REGRESSION_APPROVAL_BLOCKED"`).
+- Approving when candidate verification evidence or independent review evidence does not match the active final candidate snapshot/patch returns `409 Conflict` (`code: "CANDIDATE_VERIFICATION_MISMATCH"` or `"STALE_REVIEW_CANDIDATE"`).
 - Approving when A1 detected mandatory unresolved requirement ambiguities returns `409 Conflict` (`code: "UNRESOLVED_REQUIREMENT_AMBIGUITY"`).
+- Approving when an independent reviewer (A6) raised an unresolved material disagreement or returned `reject` returns `409 Conflict` (`code: "INDEPENDENT_REVIEW_DISAGREEMENT"` or `"INDEPENDENT_REVIEW_REJECTED"`). When `require_independent_review=true`, unavailable review or `needs_review` also blocks ordinary approval (`"INDEPENDENT_REVIEW_REQUIRED"` or `"INDEPENDENT_REVIEW_NEEDS_REVIEW"`).
 - Final decisions never commit, merge, push, deploy, or modify the original repository.
+
+### 5.8 Independent Review & Reconciliation Fields (`RunSummaryResponse`, `RunDetailResponse`, `ChangePackageResponse`)
+
+In addition to A1, M01, A4, M03, M04, baseline comparison, and repair fields, P0-9 exposes backward-compatible independent review and reconciliation fields (all defaulting safely to `null`/`[]`/`false` for historical pre-P0-9 runs):
+
+- `RunSummaryResponse`: `review_availability`, `reviewer_recommendation`, `complete_requirement_assurance`.
+- `RunDetailResponse` & `ChangePackageResponse`:
+  - `independent_review` (`IndependentReviewResponse`): `status`, `availability`, `recommendation`, `reviewed_candidate_proposal_id`, `reviewed_candidate_patch_sha256`, `summary`, `findings`, `requirement_compliance_concerns`, `potential_behavioral_regressions`, `security_and_maintainability_concerns`, `missing_verification_evidence`, `unsupported_assumptions`, `evidence_references`, `model_metadata`, `is_deterministic_fixture`, `is_mock_output`, `error`.
+  - `review_reconciliation` (`EvidenceReconciliationResponse`): `reconciliation_status`, `assurance_classification`, `deterministic_verification_passed`, `baseline_regression_confirmed`, `review_candidate_identity_verified`, `review_availability`, `reviewer_recommendation`, `reviewer_is_deterministic_fixture`, `material_disagreements`, `unsubstantiated_claims`, `approval_restrictions`, `blocks_ordinary_approval`, `blocking_error_code`, `complete_requirement_assurance`, `reconciliation_notes`.
+  - Top-level convenience fields: `review_availability`, `reviewer_recommendation`, `material_disagreements`, `approval_restrictions`, `reviewed_candidate_proposal_id`, `reviewed_candidate_patch_sha256`, `complete_requirement_assurance`.
 
 ---
 
@@ -531,7 +548,7 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 | :--- | :--- | :--- |
 | `403 Forbidden` | Repository path or ID outside server allowlist | `REPOSITORY_ACCESS_DENIED` |
 | `404 Not Found` | Unknown workflow `run_id` | `RUN_NOT_FOUND` |
-| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `BASELINE_WORKSPACE_TAMPERED`, `VERIFICATION_APPROVAL_BLOCKED`, `REGRESSION_APPROVAL_BLOCKED`, `REPAIR_REVIEW_REQUIRED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
+| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `BASELINE_WORKSPACE_TAMPERED`, `CANDIDATE_VERIFICATION_MISMATCH`, `STALE_REVIEW_CANDIDATE`, `PATCH_APPLICATION_REQUIRED`, `VERIFICATION_APPROVAL_BLOCKED`, `REGRESSION_APPROVAL_BLOCKED`, `REPAIR_REVIEW_REQUIRED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `INDEPENDENT_REVIEW_DISAGREEMENT`, `INDEPENDENT_REVIEW_REJECTED`, `INDEPENDENT_REVIEW_REQUIRED`, `INDEPENDENT_REVIEW_NEEDS_REVIEW`, `DUPLICATE_FINAL_DECISION` |
 | `422 Unprocessable Content` | Invalid request DTO or unknown scenario ID for run | `VALIDATION_ERROR`, `UNKNOWN_SCENARIO_ID` |
 | `503 Service Unavailable` | Database or required local infrastructure failure | `INFRASTRUCTURE_UNAVAILABLE` |
 | `500 Internal Server Error` | Unexpected server error (safe generic message) | `INTERNAL_SERVER_ERROR` |
@@ -540,15 +557,15 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 
 ## 7. Recommended React Dashboard Flow (Nafris)
 
-1. Call `GET /health` on load to display backend readiness, `configured_repository_ids`, and whether `live_llm_configured` is active.
-2. Submit `POST /api/runs` (`202 Accepted`) with selected `repository_id`, `source_path`, `base_ref`, `requirements`, and `execution_mode`.
+1. Call `GET /health` on load to display backend readiness, `configured_repository_ids`, `live_llm_configured`, `patch_generator_configured`, and `independent_reviewer_configured`.
+2. Submit `POST /api/runs` (`202 Accepted`) with selected `repository_id`, `source_path`, `base_ref`, `requirements`, `workflow_mode`, and `execution_mode`.
 3. Poll `GET /api/runs/{run_id}` until `state` leaves active stages.
 4. When `state === "AWAITING_TEST_REVIEW"`:
-   - Render `codebase_analysis` (changed files, direct/indirect impacted modules).
+   - Render `codebase_analysis` (changed files, direct/indirect impacted modules) and patch evidence (when `generate_and_verify_change`).
    - Render `test_generation.scenarios` with checkboxes keyed by `scenario_id`, showing `is_mock_output` / `model_label` badges and `assumptions`.
    - Submit `POST /api/runs/{run_id}/test-review`.
-5. If approved (`202 Accepted`), poll `GET /api/runs/{run_id}` until `state === "AWAITING_FINAL_APPROVAL"` (or `FAILED`).
-6. Render `verification` (outcome, pass/fail counts, failure diagnostics, `risk_summary`), `report` (`recommendation_label`, `evidence_limitations`, `unverified_requirements`), and `GET /api/runs/{run_id}/logs`.
+5. If approved (`202 Accepted`), poll `GET /api/runs/{run_id}` through baseline/modified verification, bounded repair (if any), `RUNNING_INDEPENDENT_REVIEW`, `RECONCILING_REVIEW_EVIDENCE`, and `COMPILING_REPORT` until `state === "AWAITING_FINAL_APPROVAL"` (or `FAILED`).
+6. Render `verification`, `baseline_comparison`, `repair_history`, `independent_review` (with explicit offline-fixture or unavailable badges), `review_reconciliation` (`assurance_classification`, `complete_requirement_assurance`, `material_disagreements`, `approval_restrictions`), `report`, and `GET /api/runs/{run_id}/logs`.
 7. Submit `POST /api/runs/{run_id}/decision` using `allowed_actions` to enforce UI guardrails.
 
 ---
@@ -556,7 +573,8 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 ## 8. Known MVP Limitations
 
 1. **In-process background execution:** Runs execute in a single-process bounded thread pool (not Redis/Celery). Process restarts mark interrupted active runs as `FAILED` without replaying external LLM calls or pytest; paused human-review runs remain resumable.
-2. **No OS/container sandbox:** Git workspace isolation is not an OS security sandbox. Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled.
-3. **No authentication layer:** Reviewer labels are unauthenticated local metadata.
-4. **A4 patch generation agent unimplemented (integration & bounded repair infrastructure ready):** `PatchGenerationAdapter`, controlled patch validation/application, and bounded automated repair orchestration (max 2 repair attempts / 3 total proposals; see [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md)) are ready for dependency injection of the future teammate-owned A4 agent (`PATCH_GENERATOR_UNAVAILABLE` until connected; live mode never falls back to offline fixtures).
+2. **No OS/container sandbox:** Git workspace isolation is not an OS security sandbox. Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled. Static patch checks cannot guarantee safe execution of arbitrary code.
+3. **Local unauthenticated API:** No authentication or authorization layer is enforced on M02 HTTP endpoints; `reviewer` labels are unauthenticated local metadata. Bind to loopback (`127.0.0.1`) only for local development.
+4. **A4 patch generation & A6 independent review AI unimplemented (integration infrastructure ready):** Injectable `PatchGenerationAdapter` (with bounded repair, max 2 attempts; [`BOUNDED_PATCH_REPAIR.md`](./BOUNDED_PATCH_REPAIR.md)) and injectable `IndependentReviewAdapter` (with deterministic evidence reconciliation; [`INDEPENDENT_REVIEW_INTEGRATION.md`](./INDEPENDENT_REVIEW_INTEGRATION.md)) are ready for dependency injection of future teammate-owned production agents. Live mode never silently falls back to offline fixtures.
 5. **M04 itemized test-node reporting, coverage, and AI root-cause analysis remain limited:** Baseline-versus-modified verification comparison is implemented in M02 (`docs/m02/BASELINE_VERIFICATION_INTEGRATION.md`), but unmodified M04 `report_parser.py` omits individual passed pytest node IDs; code coverage and AI root-cause analysis remain explicitly reported as `unavailable` rather than fabricated.
+6. **Backend reliability audit findings:** See [`BACKEND_RELIABILITY_AUDIT.md`](./BACKEND_RELIABILITY_AUDIT.md) for all confirmed defects fixed during P0-9 finalization and remaining operational constraints.

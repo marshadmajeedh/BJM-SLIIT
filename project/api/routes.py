@@ -81,13 +81,14 @@ async def health_check(
     ver_deps_ok = _verification_deps_available()
     live_configured = bool(config.get_groq_api_key() and config.groq_model)
     patch_gen_configured = bool(orchestrator.patch_adapter.is_production_configured)
+    reviewer_configured = bool(orchestrator.review_adapter.is_production_configured)
 
     overall = "ok" if (db_ok and git_ok) else "degraded"
     limitations = [
         "Background workflow stages execute in a single-process bounded thread pool (not a durable distributed queue).",
         "Untrusted repository execution is disabled; pytest runs only inside server-trusted roots.",
         "Git workspace isolation is not an operating-system security sandbox.",
-        "Reviewer labels are local MVP metadata and do not represent authenticated user identities.",
+        "Local API endpoints are unauthenticated in this MVP; reviewer labels are local metadata and do not represent authenticated identities.",
     ]
     if not live_configured:
         limitations.append(
@@ -96,6 +97,10 @@ async def health_check(
     if not patch_gen_configured:
         limitations.append(
             "Production A4 patch generation agent is not configured; generate_and_verify_change requires an injected PatchGeneratorProvider."
+        )
+    if not reviewer_configured:
+        limitations.append(
+            "Production A6 independent reviewer agent is not configured; independent review reports 'unavailable' unless an IndependentReviewerProvider is injected."
         )
 
     return HealthResponse(
@@ -106,6 +111,8 @@ async def health_check(
         live_llm_configured=live_configured,
         groq_model=config.groq_model if live_configured else None,
         patch_generator_configured=patch_gen_configured,
+        independent_reviewer_configured=reviewer_configured,
+        require_independent_review=config.require_independent_review,
         auto_repair_enabled=config.auto_repair_enabled,
         max_repair_attempts=config.max_repair_attempts,
         verification_dependencies_available=ver_deps_ok,

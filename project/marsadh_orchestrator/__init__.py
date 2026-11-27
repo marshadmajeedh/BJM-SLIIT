@@ -2,11 +2,17 @@
 
 from .adapters import (
     DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL,
+    DEFAULT_OFFLINE_REVIEW_FIXTURE_LABEL,
+    DeterministicIndependentReviewerFixture,
     DeterministicPersistentRegressionPatchFixture,
     DeterministicPremiumDiscountPatchFixture,
     DeterministicRegressiveThenFixedPatchFixture,
+    IndependentReviewAdapter,
+    IndependentReviewerProvider,
     PatchGenerationAdapter,
     PatchGeneratorProvider,
+    build_known_artifact_registry,
+    validate_review_evidence_references,
 )
 from .baseline_verification import (
     BaselineComparisonEngine,
@@ -53,6 +59,13 @@ from .requirement_analyst import (
     deterministic_offline_requirement_analyzer,
     format_requirements_for_downstream,
 )
+from .review_reconciliation import (
+    ApprovalPolicyDecision,
+    CandidateIntegrityCheck,
+    EvidenceReconciliationEngine,
+    evaluate_approval_policy,
+    verify_candidate_evidence_integrity,
+)
 from .store import RunStore, generate_log_id, generate_run_id, redact_secrets
 from .workspace import (
     UnsupportedWorkspaceStateError,
@@ -65,13 +78,20 @@ from .workspace import (
 __all__ = [
     "ACTIVE_EXECUTION_STATES",
     "ALLOWED_TRANSITIONS",
+    "ApprovalPolicyDecision",
     "BaselineComparisonEngine",
     "BaselineTestMirrorError",
+    "CandidateIntegrityCheck",
     "DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL",
     "DEFAULT_OFFLINE_REQUIREMENT_LABEL",
+    "DEFAULT_OFFLINE_REVIEW_FIXTURE_LABEL",
+    "DeterministicIndependentReviewerFixture",
     "DeterministicPersistentRegressionPatchFixture",
     "DeterministicPremiumDiscountPatchFixture",
     "DeterministicRegressiveThenFixedPatchFixture",
+    "EvidenceReconciliationEngine",
+    "IndependentReviewAdapter",
+    "IndependentReviewerProvider",
     "InfrastructureUnavailableError",
     "InvalidStateTransitionError",
     "OrchestratorConfig",
@@ -96,6 +116,7 @@ __all__ = [
     "WorkspaceError",
     "WorkspaceManager",
     "WorkspaceSecurityError",
+    "build_known_artifact_registry",
     "build_repair_request_evidence",
     "build_requirement_analysis_prompt",
     "build_test_evidence_from_aggregate_result",
@@ -106,6 +127,7 @@ __all__ = [
     "default_offline_model_stub",
     "deterministic_offline_requirement_analyzer",
     "discover_existing_regression_tests",
+    "evaluate_approval_policy",
     "execute_snapshot_verification",
     "format_requirements_for_downstream",
     "generate_log_id",
@@ -115,5 +137,7 @@ __all__ = [
     "mirror_approved_tests_to_workspace",
     "redact_secrets",
     "resolve_scenario_test_purpose",
+    "validate_review_evidence_references",
     "validate_transition",
+    "verify_candidate_evidence_integrity",
 ]

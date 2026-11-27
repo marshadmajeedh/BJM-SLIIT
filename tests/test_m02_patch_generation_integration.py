@@ -408,12 +408,25 @@ def test_clean_repo_generate_and_verify_end_to_end_offline_fixture_demo(
         assert gate1["workflow_mode"] == WorkflowMode.GENERATE_AND_VERIFY_CHANGE.value
         assert gate1["allowed_actions"] == ["submit_test_review"]
 
-        # Pre-change context explicitly documents M01 static-index scope
+        # Pre-change context explicitly documents M01 static-index scope AND preserves AST symbols (GAP-04)
         pre_ctx = gate1["pre_change_context"]
         assert pre_ctx["status"] == "completed"
         assert pre_ctx["scope"] == "static_repository_index_only"
         assert pre_ctx["pre_change_impact_prediction_available"] is False
         assert pre_ctx["total_indexed_files"] == 5
+        indexed_by_path = {
+            entry["repo_relative_path"]: entry for entry in pre_ctx["indexed_files"]
+        }
+        assert indexed_by_path["mini_pos/billing.py"]["functions"] == [
+            "calculate_total",
+            "apply_discount",
+            "checkout",
+        ]
+        assert indexed_by_path["mini_pos/refunds.py"]["functions"] == ["calculate_refund"]
+        assert indexed_by_path["mini_pos/refunds.py"]["imports"] == ["billing"]
+        assert indexed_by_path["mini_pos/reports.py"]["imports"] == ["billing"]
+        assert indexed_by_path["mini_pos/customer_service.py"]["imports"] == ["refunds"]
+        assert indexed_by_path["mini_pos/dashboard.py"]["imports"] == ["customer_service"]
 
         # Explicit offline fixture labeling
         pg = gate1["patch_generation"]
@@ -1374,3 +1387,301 @@ def test_persistence_backward_compatibility_and_safe_restart_recovery_for_patch_
     assert legacy_record.patch_validation is None
     assert legacy_record.patch_application is None
     assert legacy_record.pre_change_context is None
+
+    # 4. Pre-GAP-04 legacy PreChangeFileSummary JSON (without *_metadata / metadata_warnings) loads cleanly
+    from project.schemas.patch import PreChangeFileSummary
+
+    legacy_summary_json = json.dumps(
+        {
+            "repo_relative_path": "mini_pos/billing.py",
+            "source_relative_path": "billing.py",
+            "functions": ["calculate_total"],
+            "classes": [],
+            "imports": [],
+            "parse_error": None,
+        }
+    )
+    legacy_summary = PreChangeFileSummary.model_validate_json(legacy_summary_json)
+    assert legacy_summary.functions == ["calculate_total"]
+    assert legacy_summary.function_metadata == []
+    assert legacy_summary.class_metadata == []
+    assert legacy_summary.import_metadata == []
+    assert legacy_summary.metadata_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# GAP-04: Downstream A4 PatchGenerationRequest Context Forwarding & Redaction
+# ---------------------------------------------------------------------------
+
+
+def test_a4_receives_populated_mini_pos_ast_context_via_injectable_interface(
+    tmp_path: Path,
+) -> None:
+    """GAP-04: Verify real M01 mini_pos AST metadata reaches PatchGenerationRequest for A4."""
+    repos_root = tmp_path / "repos"
+    clean_repo = repos_root / "clean_mini_pos"
+    _create_mini_pos_repo(clean_repo, clean=True)
+    cfg = _make_config(
+        tmp_path,
+        repos_root=repos_root,
+        configured={"clean-mini-pos": clean_repo},
+    )
+
+    captured_requests: list[PatchGenerationRequest] = []
+    fixture = DeterministicPremiumDiscountPatchFixture()
+
+    def _capturing_a4_provider(req: PatchGenerationRequest) -> PatchGenerationResult:
+        captured_requests.append(req)
+        return fixture.generate_patch(req)
+
+    svc = OrchestratorService(
+        config=cfg,
+        store=RunStore(cfg.database_path),
+        workspace_manager=WorkspaceManager(cfg),
+        codebase_adapter=CodebaseAdapter(cfg),
+        testing_adapter=TestingAdapter(cfg),
+        verification_adapter=VerificationAdapter(cfg),
+        patch_adapter=PatchGenerationAdapter(
+            cfg,
+            offline_fixture_provider=_capturing_a4_provider,
+        ),
+        offline_model_callable=_behavioral_m03_stub,
+    )
+
+    run = svc.start_run(
+        CreateRunRequest(
+            repository_id="clean-mini-pos",
+            source_path="mini_pos",
+            requirements=PREMIUM_DISCOUNT_REQUIREMENT,
+            workflow_mode=WorkflowMode.GENERATE_AND_VERIFY_CHANGE,
+            execution_mode=ExecutionMode.OFFLINE_TEST,
+        )
+    )
+    assert run.state == WorkflowState.AWAITING_TEST_REVIEW
+    assert len(captured_requests) == 1
+
+    req = captured_requests[0]
+    assert req.codebase_context is not None
+    assert req.codebase_context.status == "completed"
+    assert req.codebase_context.total_indexed_files == 5
+
+    by_path = {
+        item.repo_relative_path: item for item in req.codebase_context.indexed_files
+    }
+    billing = by_path["mini_pos/billing.py"]
+    assert billing.functions == ["calculate_total", "apply_discount", "checkout"]
+    assert [(m.name, m.kind) for m in billing.function_metadata] == [
+        ("calculate_total", "function"),
+        ("apply_discount", "function"),
+        ("checkout", "function"),
+    ]
+    assert all(m.line is not None and m.end_line is not None for m in billing.function_metadata)
+
+    refunds = by_path["mini_pos/refunds.py"]
+    assert refunds.functions == ["calculate_refund"]
+    assert refunds.imports == ["billing"]
+    assert len(refunds.import_metadata) == 1
+    assert (
+        refunds.import_metadata[0].name,
+        refunds.import_metadata[0].kind,
+        refunds.import_metadata[0].level,
+    ) == ("billing", "absolute", 0)
+
+    reports = by_path["mini_pos/reports.py"]
+    assert reports.functions == ["generate_sales_report"]
+    assert reports.imports == ["billing"]
+
+    assert "mini_pos/billing.py" in req.relevant_source_files
+    assert "def apply_discount" in req.relevant_source_files["mini_pos/billing.py"]
+
+
+def test_a4_receives_classes_functions_absolute_and_relative_imports_with_redaction(
+    tmp_path: Path,
+) -> None:
+    """GAP-04: Controlled Python package fixture verifies A4 receives full AST context & redaction."""
+    repos_root = tmp_path / "repos"
+    repo = repos_root / "controlled_pkg"
+    pkg_dir = repo / "pkg"
+    sub_dir = pkg_dir / "services"
+    sub_dir.mkdir(parents=True)
+
+    synthetic_secret = "gsk_" + "ControlledFixtureSecretValue9876543210"
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    (sub_dir / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "models.py").write_text(
+        "class Order:\n"
+        "    def total(self, price, qty):\n"
+        "        return price * qty\n\n"
+        "def apply_discount(total, customer_type):\n"
+        "    return total\n",
+        encoding="utf-8",
+    )
+    (sub_dir / "billing_service.py").write_text(
+        "import math\n"
+        "from . import helper\n"
+        "from .helper import round_amount\n"
+        "from ..models import Order, apply_discount\n\n"
+        "class BillingService:\n"
+        "    def checkout(self, price, qty, customer_type):\n"
+        "        amount = Order().total(price, qty)\n"
+        "        return round_amount(apply_discount(amount, customer_type))\n\n"
+        "    async def audit_log(self):\n"
+        "        return math.floor(1.5)\n",
+        encoding="utf-8",
+    )
+    (sub_dir / "helper.py").write_text(
+        f"# synthetic credential token={synthetic_secret}\n"
+        "def round_amount(value):\n"
+        "    return round(value, 2)\n",
+        encoding="utf-8",
+    )
+    # Sensitive files that must never be indexed or sent to A4
+    (pkg_dir / "secrets.py").write_text(f"KEY = '{synthetic_secret}'\n", encoding="utf-8")
+    (pkg_dir / "credentials.py").write_text(f"PWD = '{synthetic_secret}'\n", encoding="utf-8")
+    (pkg_dir / ".env").write_text(f"GROQ_API_KEY={synthetic_secret}\n", encoding="utf-8")
+    # Unrelated source outside source_path='pkg'
+    (repo / "unrelated.py").write_text("SECRET_OUTSIDE = 'must_not_appear'\n", encoding="utf-8")
+
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "ChangeGuard GAP-04")
+    _git(repo, "config", "user.email", "gap04@example.invalid")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline controlled package")
+
+    cfg = _make_config(
+        tmp_path,
+        repos_root=repos_root,
+        configured={"controlled-pkg": repo},
+    )
+
+    captured_requests: list[PatchGenerationRequest] = []
+
+    def _inspecting_a4_provider(req: PatchGenerationRequest) -> PatchGenerationResult:
+        captured_requests.append(req)
+        diff = (
+            "diff --git a/pkg/models.py b/pkg/models.py\n"
+            "--- a/pkg/models.py\n"
+            "+++ b/pkg/models.py\n"
+            "@@ -5,2 +5,4 @@ class Order:\n"
+            " def apply_discount(total, customer_type):\n"
+            "+    if customer_type == 'premium':\n"
+            "+        return total * 0.90\n"
+            "     return total\n"
+        )
+        return PatchGenerationResult(
+            status="proposed",
+            attempt_number=req.attempt_number,
+            proposal=PatchProposal(
+                proposal_id="PATCH-001",
+                unified_diff=diff,
+                patch_sha256=compute_patch_sha256(diff),
+                affected_files=[PatchFileChange(path="pkg/models.py")],
+                change_rationale="Apply 10% premium discount in pkg/models.py.",
+                related_criterion_ids=[req.acceptance_criteria[0].criterion_id],
+            ),
+            model_metadata=PatchModelMetadata(
+                provider="offline_fixture",
+                model_name="controlled_gap04_fixture",
+                model_label="controlled_gap04_fixture",
+                generation_mode="offline_test",
+                is_deterministic_fixture=True,
+                is_mock_output=True,
+            ),
+            is_deterministic_fixture=True,
+            is_mock_output=True,
+        )
+
+    def _pkg_m03_stub(_prompt: str) -> str:
+        return json.dumps(
+            {
+                "scenarios": [
+                    {
+                        "title": "Premium discount via BillingService",
+                        "rationale": "Verify models.apply_discount and relative imports.",
+                        "assumptions": "Controlled offline test stub.",
+                        "test_code": (
+                            "from pkg.services.billing_service import BillingService\n"
+                            "def test_billing_service_premium():\n"
+                            "    assert BillingService().checkout(50.0, 2, 'premium') == 90.0\n"
+                        ),
+                    }
+                ]
+            }
+        )
+
+    app = create_app(
+        cfg,
+        patch_offline_fixture_provider=_inspecting_a4_provider,
+        offline_model_callable=_pkg_m03_stub,
+    )
+
+    with TestClient(app) as client:
+        run_id = client.post(
+            "/api/runs",
+            json={
+                "repository_id": "controlled-pkg",
+                "source_path": "pkg",
+                "requirements": PREMIUM_DISCOUNT_REQUIREMENT,
+                "workflow_mode": WorkflowMode.GENERATE_AND_VERIFY_CHANGE.value,
+                "execution_mode": ExecutionMode.OFFLINE_TEST.value,
+            },
+        ).json()["run_id"]
+        app.state.executor.wait_for_run(run_id, timeout=30.0)
+
+        assert len(captured_requests) == 1
+        req = captured_requests[0]
+        assert req.codebase_context is not None
+        by_path = {
+            item.repo_relative_path: item for item in req.codebase_context.indexed_files
+        }
+
+        # Repo-relative paths preserved; unrelated & sensitive files excluded
+        assert "pkg/models.py" in by_path
+        assert "pkg/services/billing_service.py" in by_path
+        assert "pkg/services/helper.py" in by_path
+        assert "unrelated.py" not in by_path
+        assert "unrelated.py" not in req.relevant_source_files
+        assert "pkg/secrets.py" not in by_path
+        assert "pkg/credentials.py" not in by_path
+        assert "pkg/.env" not in by_path
+        assert all(p.startswith("pkg/") for p in req.relevant_source_files)
+
+        # Classes, functions, methods, async functions preserved
+        models = by_path["pkg/models.py"]
+        assert models.classes == ["Order"]
+        assert models.class_metadata[0].name == "Order"
+        assert models.class_metadata[0].line == 1
+        assert models.functions == ["Order.total", "apply_discount"]
+        assert [(m.name, m.kind) for m in models.function_metadata] == [
+            ("Order.total", "method"),
+            ("apply_discount", "function"),
+        ]
+
+        # Absolute and relative imports preserved with exact kind & level metadata
+        svc_file = by_path["pkg/services/billing_service.py"]
+        assert svc_file.classes == ["BillingService"]
+        assert svc_file.functions == ["BillingService.checkout", "BillingService.audit_log"]
+        assert [(m.name, m.kind) for m in svc_file.function_metadata] == [
+            ("BillingService.checkout", "method"),
+            ("BillingService.audit_log", "async_function"),
+        ]
+        assert svc_file.imports == ["math", ".", ".helper", "..models"]
+        assert [(m.name, m.kind, m.level) for m in svc_file.import_metadata] == [
+            ("math", "absolute", 0),
+            ("", "relative", 1),
+            ("helper", "relative", 1),
+            ("models", "relative", 2),
+        ]
+
+        # Secret redaction in forwarded source context, SQLite DB, and API response
+        assert synthetic_secret not in req.relevant_source_files["pkg/services/helper.py"]
+        assert "[REDACTED" in req.relevant_source_files["pkg/services/helper.py"]
+        assert synthetic_secret.encode("utf-8") not in cfg.database_path.read_bytes()
+
+        detail_res = client.get(f"/api/runs/{run_id}")
+        assert detail_res.status_code == 200
+        assert synthetic_secret not in detail_res.text
+        assert str(tmp_path) not in detail_res.text
+        detail = detail_res.json()
+        assert detail["state"] == WorkflowState.AWAITING_TEST_REVIEW.value
+        assert "pkg/services/billing_service.py" in detail["codebase_analysis"]["impacted_modules_repo_relative"]
