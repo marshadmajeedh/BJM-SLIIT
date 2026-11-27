@@ -25,11 +25,15 @@ from project.api.routes import API_VERSION, router
 from project.api.schemas import ErrorResponse
 from project.marsadh_orchestrator.adapters import (
     CodebaseAdapter,
+    IndependentReviewAdapter,
     PatchGenerationAdapter,
     TestingAdapter,
     VerificationAdapter,
 )
 from project.marsadh_orchestrator.adapters.patch_adapter import InjectablePatchProvider
+from project.marsadh_orchestrator.adapters.review_adapter import (
+    InjectableReviewerProvider,
+)
 from project.marsadh_orchestrator.config import OrchestratorConfig
 from project.marsadh_orchestrator.patch_engine import PatchApplicator, PatchValidator
 from project.marsadh_orchestrator.requirement_analyst import (
@@ -86,6 +90,9 @@ def create_app(
     patch_offline_fixture_provider: InjectablePatchProvider | None = None,
     patch_validator: PatchValidator | None = None,
     patch_applicator: PatchApplicator | None = None,
+    review_adapter: IndependentReviewAdapter | None = None,
+    review_production_provider: InjectableReviewerProvider | None = None,
+    review_offline_fixture_provider: InjectableReviewerProvider | None = None,
     requirement_offline_callable: Callable[[str], str] | None = None,
     requirement_offline_label: str = DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     requirement_live_callable: Callable[[str], str] | None = None,
@@ -109,6 +116,11 @@ def create_app(
             production_provider=patch_production_provider,
             offline_fixture_provider=patch_offline_fixture_provider,
         )
+        resolved_review_adapter = review_adapter or IndependentReviewAdapter(
+            config=resolved_config,
+            production_provider=review_production_provider,
+            offline_fixture_provider=review_offline_fixture_provider,
+        )
         resolved_orchestrator = OrchestratorService(
             config=resolved_config,
             store=store,
@@ -120,6 +132,7 @@ def create_app(
             patch_adapter=resolved_patch_adapter,
             patch_validator=patch_validator,
             patch_applicator=patch_applicator,
+            review_adapter=resolved_review_adapter,
             requirement_offline_callable=requirement_offline_callable,
             requirement_offline_label=requirement_offline_label,
             requirement_live_callable=requirement_live_callable,

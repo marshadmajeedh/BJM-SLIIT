@@ -920,6 +920,35 @@ def execute_snapshot_verification(
             candidate = ws_root / spec.relative_path
             if candidate.is_file():
                 actual_file_sha = _sha256_file(candidate)
+                if not hmac.compare_digest(actual_file_sha, spec.expected_sha256):
+                    hard_integrity_error = AgentError(
+                        code="TEST_CONTENT_MODIFIED",
+                        message=(
+                            f"Approved test '{sc_id}' ({spec.relative_path}) changed during "
+                            "verification execution; refusing to accept tampered results."
+                        ),
+                        details={
+                            "test_id": sc_id,
+                            "expected_sha256": spec.expected_sha256,
+                            "actual_sha256": actual_file_sha,
+                        },
+                    )
+                    test_evidence.append(
+                        TestExecutionEvidence(
+                            test_identity=sc_id,
+                            scenario_id=sc_id,
+                            relative_path=spec.relative_path,
+                            suite_kind=TestSuiteKind.GENERATED_ACCEPTANCE,
+                            test_purpose=test_purposes.get(sc_id, TestPurpose.UNKNOWN),
+                            criterion_ids=list(criterion_ids_by_test.get(sc_id, [])),
+                            test_source_sha256=actual_file_sha,
+                            outcome=IndividualTestOutcome.NOT_EXECUTED,
+                            exit_code=single_res.exit_code,
+                            evidence_granularity="unavailable",
+                            evidence_limitations=[hard_integrity_error.message],
+                        )
+                    )
+                    break
                 verified_hashes[sc_id] = actual_file_sha
 
         outcome, node_id, item_lims = _outcome_from_single_file_verification(single_res)
