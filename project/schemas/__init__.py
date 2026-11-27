@@ -37,8 +37,11 @@ from .patch import (
     PatchModelMetadata,
     PatchProposal,
     PatchValidationResult,
+    PreChangeClassMetadata,
     PreChangeCodebaseContext,
     PreChangeFileSummary,
+    PreChangeFunctionMetadata,
+    PreChangeImportMetadata,
     compute_patch_sha256,
 )
 from .repair import (
@@ -131,8 +134,11 @@ __all__ = [
     "PatchModelMetadata",
     "PatchProposal",
     "PatchValidationResult",
+    "PreChangeClassMetadata",
     "PreChangeCodebaseContext",
     "PreChangeFileSummary",
+    "PreChangeFunctionMetadata",
+    "PreChangeImportMetadata",
     "RegressionComparisonSummary",
     "RepairAttemptHistory",
     "RepairEligibilityCategory",
