@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -237,6 +237,101 @@ class RunStore:
             WorkflowRunRecord.model_validate_json(row["payload_json"])
             for row in rows
         ]
+
+    def count_runs(self, *, state: WorkflowState | None = None) -> int:
+        """Return the total number of persisted runs, optionally filtered by state."""
+        with self._connect(write=False) as conn:
+            if state is not None:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM workflow_runs WHERE state = ?",
+                    (state.value,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM workflow_runs"
+                ).fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
+    def list_runs_by_states(
+        self, states: Iterable[WorkflowState]
+    ) -> list[WorkflowRunRecord]:
+        """Return all persisted runs whose state belongs to the given set."""
+        state_values = [state.value for state in states]
+        if not state_values:
+            return []
+        placeholders = ",".join("?" for _ in state_values)
+        query = (
+            f"SELECT payload_json FROM workflow_runs "
+            f"WHERE state IN ({placeholders}) "
+            f"ORDER BY created_at ASC, run_id ASC"
+        )
+        with self._connect(write=False) as conn:
+            rows = conn.execute(query, state_values).fetchall()
+        return [
+            WorkflowRunRecord.model_validate_json(row["payload_json"])
+            for row in rows
+        ]
+
+    def check_health(self) -> bool:
+        """Return True if the SQLite database responds to a lightweight read query."""
+        try:
+            with self._connect(write=False) as conn:
+                row = conn.execute("SELECT 1 AS ok").fetchone()
+            return bool(row is not None and row["ok"] == 1)
+        except sqlite3.Error:
+            return False
+
+    def update_run_atomic(
+        self,
+        run_id: str,
+        *,
+        expected_state: WorkflowState | set[WorkflowState] | frozenset[WorkflowState] | None = None,
+        updater: Callable[[WorkflowRunRecord], WorkflowRunRecord],
+    ) -> WorkflowRunRecord:
+        """Atomically verify expected state, apply updater, and persist the run record."""
+        with self._connect(write=True) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM workflow_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Workflow run not found: '{run_id}'")
+
+            current = WorkflowRunRecord.model_validate_json(row["payload_json"])
+            if expected_state is not None:
+                allowed = (
+                    {expected_state}
+                    if isinstance(expected_state, WorkflowState)
+                    else set(expected_state)
+                )
+                if current.state not in allowed:
+                    allowed_str = ", ".join(sorted(s.value for s in allowed))
+                    raise ValueError(
+                        f"State conflict for run '{run_id}': expected one of "
+                        f"[{allowed_str}], found '{current.state.value}'"
+                    )
+
+            updated = updater(current)
+            sanitized = updated.model_copy(
+                update={
+                    "updated_at": utc_now(),
+                    "error": _sanitize_error(updated.error),
+                }
+            )
+            conn.execute(
+                """
+                UPDATE workflow_runs
+                SET state = ?, updated_at = ?, payload_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    sanitized.state.value,
+                    sanitized.updated_at.isoformat(),
+                    sanitized.model_dump_json(),
+                    run_id,
+                ),
+            )
+        return sanitized
 
     def update_state(
         self,

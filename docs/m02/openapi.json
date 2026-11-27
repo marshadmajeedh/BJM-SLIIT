@@ -1,0 +1,2444 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ChangeGuard AI API",
+    "description": "Multi-agent software change assurance framework",
+    "version": "0.2.0-mvp"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Service health and capability status",
+        "description": "Return safe service health and runtime capability flags without exposing secrets.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs": {
+      "post": {
+        "tags": [
+          "Workflow Runs"
+        ],
+        "summary": "Create and schedule a new change assurance workflow run",
+        "description": "Persist a new workflow run and schedule M01 + M03 analysis in-process.",
+        "operationId": "create_workflow_run_api_runs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateRunResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Repository path or ID is not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required infrastructure unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Workflow Runs"
+        ],
+        "summary": "List persisted workflow runs with bounded pagination",
+        "description": "Return paginated workflow run summaries ordered newest-first.",
+        "operationId": "list_workflow_runs_api_runs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WorkflowState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "Workflow Runs"
+        ],
+        "summary": "Retrieve full details for a single workflow run",
+        "description": "Return dashboard-ready workflow details, evidence, and allowed actions.",
+        "operationId": "get_workflow_run_api_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow run not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/logs": {
+      "get": {
+        "tags": [
+          "Workflow Runs"
+        ],
+        "summary": "Retrieve structured agent communication logs for a run",
+        "description": "Return secret-redacted communication logs in deterministic insertion order.",
+        "operationId": "get_workflow_run_logs_api_runs__run_id__logs_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLogsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow run not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/test-review": {
+      "post": {
+        "tags": [
+          "Human Review Gates"
+        ],
+        "summary": "Submit Human Review Gate 1 decision for proposed test scenarios",
+        "description": "Approve selected generated tests (scheduling M04 verification) or reject them.",
+        "operationId": "submit_test_review_api_runs__run_id__test_review_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated test proposals rejected (terminal REJECTED state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetailResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Selected test scenarios approved; verification scheduled"
+          },
+          "404": {
+            "description": "Workflow run not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state, duplicate review, or integrity conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid scenario selection or request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/decision": {
+      "post": {
+        "tags": [
+          "Human Review Gates"
+        ],
+        "summary": "Submit Human Review Gate 2 final decision on compiled change package",
+        "description": "Persist final human decision (approve / reject / needs_review) without mutating Git.",
+        "operationId": "submit_final_decision_api_runs__run_id__decision_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HumanDecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow run not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state, repeated decision, or blocked approval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid decision payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentError": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Details"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AgentError",
+        "description": "Structured, non-secret error payload recorded across M02 components."
+      },
+      "AgentExecutionRecord": {
+        "properties": {
+          "agent_name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Agent Name"
+          },
+          "stage": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Stage"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentExecutionStatus"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Completed At"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "default": 0
+          },
+          "execution_mode": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Execution Mode",
+            "default": "offline_test"
+          },
+          "output_summary": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Output Summary",
+            "default": ""
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "agent_name",
+          "stage",
+          "status"
+        ],
+        "title": "AgentExecutionRecord",
+        "description": "Audit record describing a single agent or adapter invocation."
+      },
+      "AgentExecutionStatus": {
+        "type": "string",
+        "enum": [
+          "succeeded",
+          "completed_no_changes",
+          "failed",
+          "skipped",
+          "timeout"
+        ],
+        "title": "AgentExecutionStatus",
+        "description": "Normalized execution status for an individual agent invocation."
+      },
+      "AgentLogEntry": {
+        "properties": {
+          "log_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Id"
+          },
+          "run_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Run Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Agent Name"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/WorkflowState"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentExecutionStatus"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "default": 0
+          },
+          "input_summary": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Input Summary",
+            "default": ""
+          },
+          "output_summary": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Output Summary",
+            "default": ""
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "agent_name",
+          "stage",
+          "status"
+        ],
+        "title": "AgentLogEntry",
+        "description": "Structured inter-agent communication and stage log entry."
+      },
+      "BaselineComparisonEvidence": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "completed"
+            ],
+            "title": "Status",
+            "default": "unavailable"
+          },
+          "baseline_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Ref"
+          },
+          "baseline_passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Passed"
+          },
+          "baseline_failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Failed"
+          },
+          "modified_passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified Passed"
+          },
+          "modified_failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified Failed"
+          },
+          "newly_failing_tests": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newly Failing Tests"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": "Baseline-versus-modified comparison was not executed; running generated tests against the modified repository alone is not proof of regression safety."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BaselineComparisonEvidence",
+        "description": "Placeholder interface for future baseline-versus-modified regression runs."
+      },
+      "ChangePackageResponse": {
+        "properties": {
+          "package_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Id"
+          },
+          "package_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Sha256"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "requirements": {
+            "type": "string",
+            "title": "Requirements"
+          },
+          "repository_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "repository_name": {
+            "type": "string",
+            "title": "Repository Name"
+          },
+          "source_path": {
+            "type": "string",
+            "title": "Source Path"
+          },
+          "base_ref": {
+            "type": "string",
+            "title": "Base Ref"
+          },
+          "resolved_base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Base Commit"
+          },
+          "change_mode": {
+            "type": "string",
+            "title": "Change Mode",
+            "default": "unknown"
+          },
+          "execution_mode": {
+            "type": "string",
+            "title": "Execution Mode",
+            "default": "offline_test"
+          },
+          "model_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Label"
+          },
+          "is_mock_output": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Mock Output"
+          },
+          "changed_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Files"
+          },
+          "impacted_modules": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Impacted Modules"
+          },
+          "approved_scenario_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved Scenario Ids"
+          },
+          "executed_scenario_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Scenario Ids"
+          },
+          "risk_summary": {
+            "$ref": "#/components/schemas/RiskSummary"
+          },
+          "recommendation": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "reject",
+              "needs_review",
+              "no_changes"
+            ],
+            "title": "Recommendation"
+          },
+          "recommendation_label": {
+            "type": "string",
+            "enum": [
+              "ready_for_human_review",
+              "verification_failed",
+              "verification_incomplete",
+              "additional_review_required",
+              "no_changes"
+            ],
+            "title": "Recommendation Label"
+          },
+          "recommendation_summary": {
+            "type": "string",
+            "title": "Recommendation Summary",
+            "default": ""
+          },
+          "unverified_requirements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unverified Requirements"
+          },
+          "traceability": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Traceability"
+          },
+          "agent_communication_summary": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Agent Communication Summary"
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          },
+          "human_approval_required": {
+            "type": "boolean",
+            "title": "Human Approval Required",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "generated_at",
+          "requirements",
+          "repository_name",
+          "source_path",
+          "base_ref",
+          "recommendation",
+          "recommendation_label"
+        ],
+        "title": "ChangePackageResponse",
+        "description": "Safe auditable change package summary for the dashboard final-decision view."
+      },
+      "ChangedFileImpact": {
+        "properties": {
+          "repo_relative_path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Repo Relative Path"
+          },
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Relative Path"
+          },
+          "changed_functions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Functions"
+          },
+          "changed_lines": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Changed Lines"
+          },
+          "direct_impacted_files": {
+            "items": {
+              "$ref": "#/components/schemas/ImpactedFile"
+            },
+            "type": "array",
+            "title": "Direct Impacted Files"
+          },
+          "indirect_impacted_files": {
+            "items": {
+              "$ref": "#/components/schemas/ImpactedFile"
+            },
+            "type": "array",
+            "title": "Indirect Impacted Files"
+          },
+          "total_impacted": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Impacted",
+            "default": 0
+          },
+          "direct_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Direct Count",
+            "default": 0
+          },
+          "indirect_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Indirect Count",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "repo_relative_path",
+          "source_relative_path"
+        ],
+        "title": "ChangedFileImpact",
+        "description": "Normalized impact analysis for a single changed Python file."
+      },
+      "CodebaseAnalysisResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "no_changes",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "source_path": {
+            "type": "string",
+            "title": "Source Path"
+          },
+          "base_ref": {
+            "type": "string",
+            "title": "Base Ref"
+          },
+          "resolved_base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Base Commit"
+          },
+          "total_indexed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Indexed Files"
+          },
+          "has_relevant_changes": {
+            "type": "boolean",
+            "title": "Has Relevant Changes",
+            "default": false
+          },
+          "changed_files_repo_relative": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Files Repo Relative"
+          },
+          "changed_files_source_relative": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Files Source Relative"
+          },
+          "impacted_modules_repo_relative": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Impacted Modules Repo Relative"
+          },
+          "impacted_modules_source_relative": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Impacted Modules Source Relative"
+          },
+          "file_impacts": {
+            "items": {
+              "$ref": "#/components/schemas/ChangedFileImpact"
+            },
+            "type": "array",
+            "title": "File Impacts"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "source_path",
+          "base_ref"
+        ],
+        "title": "CodebaseAnalysisResponse",
+        "description": "Normalized M01 codebase analysis view excluding raw payloads and host paths."
+      },
+      "CreateRunRequest": {
+        "properties": {
+          "repository_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Path"
+          },
+          "repository_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "source_path": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Path",
+            "default": "."
+          },
+          "base_ref": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Base Ref",
+            "default": "HEAD"
+          },
+          "requirements": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Requirements"
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode",
+            "default": "offline_test"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "requirements"
+        ],
+        "title": "CreateRunRequest",
+        "description": "Request payload to initiate a ChangeGuard workflow run."
+      },
+      "CreateRunResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkflowState"
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "execution_model": {
+            "type": "string",
+            "title": "Execution Model",
+            "default": "in_process_background_task"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "state",
+          "execution_mode",
+          "created_at",
+          "message"
+        ],
+        "title": "CreateRunResponse",
+        "description": "HTTP 202 response returned when a workflow run is created and queued."
+      },
+      "ErrorResponse": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Details"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorResponse",
+        "description": "Safe, structured API error envelope without internal stack traces."
+      },
+      "ExecutionMode": {
+        "type": "string",
+        "enum": [
+          "offline_test",
+          "live_llm"
+        ],
+        "title": "ExecutionMode",
+        "description": "Explicit execution mode controlling offline stub vs live LLM invocation."
+      },
+      "FailureDiagnostic": {
+        "properties": {
+          "test_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Test Name"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Status"
+          },
+          "evidence": {
+            "type": "string",
+            "title": "Evidence",
+            "default": ""
+          },
+          "error_type": {
+            "type": "string",
+            "title": "Error Type",
+            "default": "Unknown"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": "Further analysis required"
+          },
+          "risk": {
+            "type": "string",
+            "title": "Risk",
+            "default": "unknown"
+          },
+          "recommendation": {
+            "type": "string",
+            "title": "Recommendation",
+            "default": "Review failure evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "test_name",
+          "status"
+        ],
+        "title": "FailureDiagnostic",
+        "description": "Structured failure evidence enriched with M04 failure_analyzer output."
+      },
+      "GeneratedTestScenario": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Scenario Id"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title"
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Rationale"
+          },
+          "assumptions": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Assumptions"
+          },
+          "test_code": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Test Code"
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256"
+          },
+          "exported_relative_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exported Relative Path"
+          },
+          "exported_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exported Sha256"
+          },
+          "approved": {
+            "type": "boolean",
+            "title": "Approved",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "title",
+          "rationale",
+          "assumptions",
+          "test_code",
+          "content_sha256"
+        ],
+        "title": "GeneratedTestScenario",
+        "description": "A single reviewable test proposal produced by M03."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service",
+            "default": "ChangeGuard AI API"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment"
+          },
+          "database_available": {
+            "type": "boolean",
+            "title": "Database Available"
+          },
+          "live_llm_configured": {
+            "type": "boolean",
+            "title": "Live Llm Configured"
+          },
+          "groq_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groq Model"
+          },
+          "verification_dependencies_available": {
+            "type": "boolean",
+            "title": "Verification Dependencies Available"
+          },
+          "git_available": {
+            "type": "boolean",
+            "title": "Git Available"
+          },
+          "configured_repository_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Configured Repository Ids"
+          },
+          "execution_model": {
+            "type": "string",
+            "title": "Execution Model",
+            "default": "in_process_bounded_threadpool"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "version",
+          "environment",
+          "database_available",
+          "live_llm_configured",
+          "verification_dependencies_available",
+          "git_available"
+        ],
+        "title": "HealthResponse",
+        "description": "Service health and capability overview (never exposes secrets)."
+      },
+      "HumanDecision": {
+        "type": "string",
+        "enum": [
+          "approve",
+          "reject",
+          "needs_review"
+        ],
+        "title": "HumanDecision",
+        "description": "Supported final human review decisions."
+      },
+      "HumanDecisionRecord": {
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/HumanDecision"
+          },
+          "reviewer": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reviewer"
+          },
+          "comments": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Comments",
+            "default": ""
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Decided At"
+          },
+          "evidence_package_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Package Id"
+          },
+          "evidence_package_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Package Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision",
+          "reviewer"
+        ],
+        "title": "HumanDecisionRecord",
+        "description": "Persisted final human decision record."
+      },
+      "HumanDecisionRequest": {
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/HumanDecision"
+          },
+          "reviewer": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reviewer"
+          },
+          "comments": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Comments",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision",
+          "reviewer"
+        ],
+        "title": "HumanDecisionRequest",
+        "description": "Final human approval gate decision for a compiled change package."
+      },
+      "ImpactedFile": {
+        "properties": {
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Relative Path"
+          },
+          "repo_relative_path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Repo Relative Path"
+          },
+          "impact_level": {
+            "type": "string",
+            "enum": [
+              "direct",
+              "indirect"
+            ],
+            "title": "Impact Level"
+          },
+          "dependency_depth": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Dependency Depth"
+          },
+          "via_file": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Via File"
+          },
+          "import_line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Import Line"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_relative_path",
+          "repo_relative_path",
+          "impact_level",
+          "dependency_depth",
+          "via_file"
+        ],
+        "title": "ImpactedFile",
+        "description": "Normalized downstream module impacted by a changed Python file."
+      },
+      "RepositorySummaryResponse": {
+        "properties": {
+          "repository_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "repository_name": {
+            "type": "string",
+            "title": "Repository Name"
+          },
+          "source_path": {
+            "type": "string",
+            "title": "Source Path"
+          },
+          "base_ref": {
+            "type": "string",
+            "title": "Base Ref"
+          },
+          "resolved_base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Base Commit"
+          },
+          "change_mode": {
+            "type": "string",
+            "enum": [
+              "working_tree",
+              "committed_range",
+              "unknown"
+            ],
+            "title": "Change Mode",
+            "default": "unknown"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "repository_name",
+          "source_path",
+          "base_ref"
+        ],
+        "title": "RepositorySummaryResponse",
+        "description": "Safe repository metadata without internal absolute filesystem paths."
+      },
+      "RiskSummary": {
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "Low",
+              "Medium",
+              "High",
+              "Critical",
+              "Unknown"
+            ],
+            "title": "Severity",
+            "default": "Unknown"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "default": "unavailable"
+          },
+          "rationale": {
+            "type": "string",
+            "title": "Rationale",
+            "default": "Risk could not be reliably calculated from available verification evidence."
+          },
+          "evidence_available": {
+            "type": "boolean",
+            "title": "Evidence Available",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RiskSummary",
+        "description": "Explicit risk summary that reports Unknown rather than fabricating scores."
+      },
+      "RunDetailResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkflowState"
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "requirements": {
+            "type": "string",
+            "title": "Requirements"
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositorySummaryResponse"
+          },
+          "source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Snapshot Sha256"
+          },
+          "git_diff_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Diff Sha256"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "allowed_actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Actions"
+          },
+          "agent_records": {
+            "items": {
+              "$ref": "#/components/schemas/AgentExecutionRecord"
+            },
+            "type": "array",
+            "title": "Agent Records"
+          },
+          "codebase_analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodebaseAnalysisResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "test_generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestGenerationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "test_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestReviewRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangePackageResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "final_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HumanDecisionRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "state",
+          "execution_mode",
+          "requirements",
+          "repository",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunDetailResponse",
+        "description": "Full dashboard-ready workflow run details without host paths or raw payloads."
+      },
+      "RunListResponse": {
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunSummaryResponse"
+            },
+            "type": "array",
+            "title": "Runs"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          },
+          "state_filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "runs",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "RunListResponse",
+        "description": "Paginated list of persisted workflow runs."
+      },
+      "RunLogsResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentLogEntry"
+            },
+            "type": "array",
+            "title": "Logs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "count",
+          "logs"
+        ],
+        "title": "RunLogsResponse",
+        "description": "Structured communication logs for a single workflow run."
+      },
+      "RunSummaryResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkflowState"
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositorySummaryResponse"
+          },
+          "requirements_preview": {
+            "type": "string",
+            "title": "Requirements Preview"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "changed_file_count": {
+            "type": "integer",
+            "title": "Changed File Count",
+            "default": 0
+          },
+          "proposed_scenario_count": {
+            "type": "integer",
+            "title": "Proposed Scenario Count",
+            "default": 0
+          },
+          "verification_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verification_passed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Passed"
+          },
+          "has_error": {
+            "type": "boolean",
+            "title": "Has Error",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "state",
+          "execution_mode",
+          "repository",
+          "requirements_preview",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunSummaryResponse",
+        "description": "Compact workflow run summary returned in paginated run listings."
+      },
+      "TestGenerationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "skipped_no_changes",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "executed": {
+            "type": "boolean",
+            "const": false,
+            "title": "Executed",
+            "default": false
+          },
+          "generation_mode": {
+            "type": "string",
+            "enum": [
+              "offline_test",
+              "live_llm"
+            ],
+            "title": "Generation Mode"
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output"
+          },
+          "model_label": {
+            "type": "string",
+            "title": "Model Label"
+          },
+          "scenarios": {
+            "items": {
+              "$ref": "#/components/schemas/GeneratedTestScenario"
+            },
+            "type": "array",
+            "title": "Scenarios"
+          },
+          "export_dir_relative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Export Dir Relative"
+          },
+          "exported_files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Exported Files"
+          },
+          "exported_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Exported Hashes"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "generation_mode",
+          "is_mock_output",
+          "model_label"
+        ],
+        "title": "TestGenerationResponse",
+        "description": "Normalized M03 test generation view excluding raw model envelopes."
+      },
+      "TestReviewRecord": {
+        "properties": {
+          "approved": {
+            "type": "boolean",
+            "title": "Approved"
+          },
+          "selected_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Selected Test Ids"
+          },
+          "approved_test_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approved Test Hashes"
+          },
+          "reviewer": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reviewer"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Notes",
+            "default": ""
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Decided At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "approved",
+          "reviewer"
+        ],
+        "title": "TestReviewRecord",
+        "description": "Persisted test review decision including approved test file hashes."
+      },
+      "TestReviewRequest": {
+        "properties": {
+          "approved": {
+            "type": "boolean",
+            "title": "Approved"
+          },
+          "selected_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Selected Test Ids"
+          },
+          "reviewer": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reviewer",
+            "default": "human_reviewer"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "approved"
+        ],
+        "title": "TestReviewRequest",
+        "description": "Human review decision for generated test proposals before verification."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VerificationOutcome": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "failed_tests",
+          "collection_error",
+          "no_tests_collected",
+          "timeout",
+          "execution_error",
+          "unavailable"
+        ],
+        "title": "VerificationOutcome",
+        "description": "Semantic outcome distinguishing verification pass from failures/errors."
+      },
+      "VerificationResponse": {
+        "properties": {
+          "execution_status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "timeout",
+              "error",
+              "not_executed"
+            ],
+            "title": "Execution Status"
+          },
+          "verification_outcome": {
+            "$ref": "#/components/schemas/VerificationOutcome"
+          },
+          "verification_passed": {
+            "type": "boolean",
+            "title": "Verification Passed",
+            "default": false
+          },
+          "executed_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Ids"
+          },
+          "executed_test_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Paths"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "total_tests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tests"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "collection_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Collection Errors"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/FailureDiagnostic"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "risk_summary": {
+            "$ref": "#/components/schemas/RiskSummary"
+          },
+          "coverage_percent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Percent"
+          },
+          "coverage_status": {
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "measured"
+            ],
+            "title": "Coverage Status",
+            "default": "unavailable"
+          },
+          "ai_root_cause_status": {
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "completed"
+            ],
+            "title": "Ai Root Cause Status",
+            "default": "unavailable"
+          },
+          "baseline_comparison": {
+            "$ref": "#/components/schemas/BaselineComparisonEvidence"
+          },
+          "stdout_excerpt": {
+            "type": "string",
+            "title": "Stdout Excerpt",
+            "default": ""
+          },
+          "stderr_excerpt": {
+            "type": "string",
+            "title": "Stderr Excerpt",
+            "default": ""
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "execution_status",
+          "verification_outcome"
+        ],
+        "title": "VerificationResponse",
+        "description": "Normalized M04 verification evidence excluding raw runner internals."
+      },
+      "WorkflowState": {
+        "type": "string",
+        "enum": [
+          "CREATED",
+          "ANALYZING_CODEBASE",
+          "GENERATING_TESTS",
+          "AWAITING_TEST_REVIEW",
+          "RUNNING_VERIFICATION",
+          "COMPILING_REPORT",
+          "AWAITING_FINAL_APPROVAL",
+          "COMPLETED_NO_CHANGES",
+          "APPROVED",
+          "REJECTED",
+          "NEEDS_REVIEW",
+          "FAILED"
+        ],
+        "title": "WorkflowState",
+        "description": "Deterministic workflow lifecycle states for M02 orchestration."
+      }
+    }
+  }
+}
