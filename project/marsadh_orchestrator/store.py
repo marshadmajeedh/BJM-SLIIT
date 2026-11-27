@@ -19,7 +19,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from project.schemas.agents import AgentError
+from project.schemas.agents import (
+    AgentError,
+    BaselineComparisonEvidence,
+    BaselineVerificationResult,
+    ModifiedVerificationResult,
+    SuiteExecutionSummary,
+    TestExecutionEvidence,
+)
 from project.schemas.workflow import AgentLogEntry, WorkflowRunRecord, WorkflowState
 
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -97,6 +104,129 @@ def _sanitize_error(error: AgentError | None) -> AgentError | None:
         update={
             "message": redact_secrets(error.message),
             "details": sanitized_details if isinstance(sanitized_details, dict) else {},
+        }
+    )
+
+
+def _sanitize_test_evidence_list(
+    items: list[TestExecutionEvidence],
+) -> list[TestExecutionEvidence]:
+    return [
+        ev.model_copy(
+            update={
+                "collection_errors": [redact_secrets(c) for c in ev.collection_errors],
+                "failure_message": (
+                    redact_secrets(ev.failure_message)
+                    if ev.failure_message is not None
+                    else None
+                ),
+                "evidence_limitations": [
+                    redact_secrets(lim) for lim in ev.evidence_limitations
+                ],
+            }
+        )
+        for ev in items
+    ]
+
+
+def _sanitize_suite_summary(
+    suite: SuiteExecutionSummary | None,
+) -> SuiteExecutionSummary | None:
+    if suite is None:
+        return None
+    return suite.model_copy(
+        update={
+            "collection_errors": [redact_secrets(c) for c in suite.collection_errors],
+            "failures": [
+                fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+                for fail in suite.failures
+            ],
+            "test_evidence": _sanitize_test_evidence_list(suite.test_evidence),
+            "evidence_limitations": [
+                redact_secrets(lim) for lim in suite.evidence_limitations
+            ],
+            "error": _sanitize_error(suite.error),
+        }
+    )
+
+
+def _sanitize_baseline_verification(
+    res: BaselineVerificationResult | None,
+) -> BaselineVerificationResult | None:
+    if res is None:
+        return None
+    return res.model_copy(
+        update={
+            "collection_errors": [redact_secrets(c) for c in res.collection_errors],
+            "failures": [
+                fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+                for fail in res.failures
+            ],
+            "test_evidence": _sanitize_test_evidence_list(res.test_evidence),
+            "existing_regression_suite": _sanitize_suite_summary(
+                res.existing_regression_suite
+            ),
+            "evidence_limitations": [
+                redact_secrets(lim) for lim in res.evidence_limitations
+            ],
+            "error": _sanitize_error(res.error),
+        }
+    )
+
+
+def _sanitize_modified_verification(
+    res: ModifiedVerificationResult | None,
+) -> ModifiedVerificationResult | None:
+    if res is None:
+        return None
+    return res.model_copy(
+        update={
+            "collection_errors": [redact_secrets(c) for c in res.collection_errors],
+            "failures": [
+                fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+                for fail in res.failures
+            ],
+            "test_evidence": _sanitize_test_evidence_list(res.test_evidence),
+            "existing_regression_suite": _sanitize_suite_summary(
+                res.existing_regression_suite
+            ),
+            "evidence_limitations": [
+                redact_secrets(lim) for lim in res.evidence_limitations
+            ],
+            "error": _sanitize_error(res.error),
+        }
+    )
+
+
+def _sanitize_baseline_comparison(
+    comp: BaselineComparisonEvidence | None,
+) -> BaselineComparisonEvidence | None:
+    if comp is None:
+        return None
+    return comp.model_copy(
+        update={
+            "baseline_result": _sanitize_baseline_verification(comp.baseline_result),
+            "modified_result": _sanitize_modified_verification(comp.modified_result),
+            "test_comparisons": [
+                tc.model_copy(
+                    update={
+                        "rationale": redact_secrets(tc.rationale),
+                        "limitations": [redact_secrets(lim) for lim in tc.limitations],
+                    }
+                )
+                for tc in comp.test_comparisons
+            ],
+            "summary": comp.summary.model_copy(
+                update={
+                    "limitations": [
+                        redact_secrets(lim) for lim in comp.summary.limitations
+                    ]
+                }
+            ),
+            "evidence_limitations": [
+                redact_secrets(lim) for lim in comp.evidence_limitations
+            ],
+            "notes": redact_secrets(comp.notes),
         }
     )
 
@@ -204,20 +334,49 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             update={"error": _sanitize_error(run.test_generation.error)}
         )
 
-    if run.report is not None and run.report.requirement_analysis is not None:
-        req_rep = run.report.requirement_analysis
-        updates["report"] = run.report.model_copy(
-            update={
-                "requirement_analysis": req_rep.model_copy(
-                    update={
-                        "requirement_summary": redact_secrets(
-                            req_rep.requirement_summary
-                        ),
-                        "error": _sanitize_error(req_rep.error),
-                        "notes": [redact_secrets(note) for note in req_rep.notes],
-                    }
-                )
-            }
+    if run.report is not None:
+        rep_updates: dict[str, object] = {}
+        if run.report.requirement_analysis is not None:
+            req_rep = run.report.requirement_analysis
+            rep_updates["requirement_analysis"] = req_rep.model_copy(
+                update={
+                    "requirement_summary": redact_secrets(
+                        req_rep.requirement_summary
+                    ),
+                    "error": _sanitize_error(req_rep.error),
+                    "notes": [redact_secrets(note) for note in req_rep.notes],
+                }
+            )
+        if run.report.baseline_verification is not None:
+            rep_updates["baseline_verification"] = _sanitize_baseline_verification(
+                run.report.baseline_verification
+            )
+        if run.report.modified_verification is not None:
+            rep_updates["modified_verification"] = _sanitize_modified_verification(
+                run.report.modified_verification
+            )
+        if run.report.baseline_comparison is not None:
+            rep_updates["baseline_comparison"] = _sanitize_baseline_comparison(
+                run.report.baseline_comparison
+            )
+        if run.report.evidence_limitations:
+            rep_updates["evidence_limitations"] = [
+                redact_secrets(lim) for lim in run.report.evidence_limitations
+            ]
+        if rep_updates:
+            updates["report"] = run.report.model_copy(update=rep_updates)
+
+    if run.baseline_verification is not None:
+        updates["baseline_verification"] = _sanitize_baseline_verification(
+            run.baseline_verification
+        )
+    if run.modified_verification is not None:
+        updates["modified_verification"] = _sanitize_modified_verification(
+            run.modified_verification
+        )
+    if run.baseline_comparison is not None:
+        updates["baseline_comparison"] = _sanitize_baseline_comparison(
+            run.baseline_comparison
         )
 
     if run.verification is not None:
@@ -225,6 +384,9 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
             for fail in run.verification.failures
         ]
+        sanitized_bc = _sanitize_baseline_comparison(
+            run.verification.baseline_comparison
+        )
         updates["verification"] = run.verification.model_copy(
             update={
                 "error": _sanitize_error(run.verification.error),
@@ -232,6 +394,9 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
                     redact_secrets(err) for err in run.verification.collection_errors
                 ],
                 "failures": sanitized_failures,
+                "baseline_comparison": sanitized_bc
+                if sanitized_bc is not None
+                else run.verification.baseline_comparison,
                 "stdout_excerpt": redact_secrets(run.verification.stdout_excerpt),
                 "stderr_excerpt": redact_secrets(run.verification.stderr_excerpt),
             }

@@ -248,7 +248,7 @@ def test_full_api_lifecycle_approval_pagination_and_no_host_path_exposure(tmp_pa
             },
         )
         assert review_res.status_code == 202
-        assert review_res.json()["state"] == WorkflowState.RUNNING_VERIFICATION.value
+        assert review_res.json()["state"] == WorkflowState.PREPARING_BASELINE.value
 
         # Duplicate approval immediately rejected with 409
         dup_res = client.post(

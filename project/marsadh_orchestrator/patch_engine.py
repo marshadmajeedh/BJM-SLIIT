@@ -1038,29 +1038,118 @@ class PatchApplicator:
         backups: dict[str, bytes | None],
         added_paths: list[str],
     ) -> bool:
-        """Restore every backed-up file and unstage/remove newly created files."""
+        """Restore every backed-up file, prune empty added dirs, and restore Git index entries."""
+        ws_resolved = ws_repo.resolve()
         try:
             for rel_posix, original_bytes in backups.items():
-                target = (ws_repo / rel_posix).resolve()
-                if not target.is_relative_to(ws_repo):
+                target = (ws_resolved / rel_posix).resolve()
+                if not target.is_relative_to(ws_resolved):
                     continue
                 if original_bytes is None:
                     if target.exists() or target.is_symlink():
                         target.unlink()
+                    # Prune any newly created empty parent directories strictly inside ws_repo
+                    parent = target.parent
+                    while parent != ws_resolved and parent.is_relative_to(ws_resolved):
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(original_bytes)
+
             if added_paths:
-                subprocess.run(
-                    ["git", "-C", str(ws_repo), "reset", "--quiet", "HEAD", "--", *added_paths],
-                    cwd=str(ws_repo),
+                reset_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(ws_resolved),
+                        "reset",
+                        "--quiet",
+                        "HEAD",
+                        "--",
+                        *added_paths,
+                    ],
+                    cwd=str(ws_resolved),
                     capture_output=True,
                     timeout=self.config.git_timeout_seconds,
                     check=False,
                 )
+                if reset_proc.returncode != 0:
+                    rm_proc = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(ws_resolved),
+                            "rm",
+                            "--cached",
+                            "--force",
+                            "--ignore-unmatch",
+                            "--quiet",
+                            "--",
+                            *added_paths,
+                        ],
+                        cwd=str(ws_resolved),
+                        capture_output=True,
+                        timeout=self.config.git_timeout_seconds,
+                        check=False,
+                    )
+                    if rm_proc.returncode != 0:
+                        return False
+
+                # Confirm no stale intent-to-add or cached entries remain for added_paths
+                ls_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(ws_resolved),
+                        "ls-files",
+                        "--",
+                        *added_paths,
+                    ],
+                    cwd=str(ws_resolved),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.git_timeout_seconds,
+                    check=False,
+                )
+                if ls_proc.returncode != 0 or ls_proc.stdout.strip():
+                    return False
+
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def _rollback_and_verify_clean(
+        self,
+        ws_repo: Path,
+        backups: dict[str, bytes | None],
+        added_paths: list[str],
+        *,
+        source_path: str,
+        base_ref: str,
+        expected_source_snapshot_sha256: str,
+        expected_git_diff_sha256: str,
+    ) -> bool:
+        """Roll back files + Git index and confirm both snapshot AND Git diff match pre-apply state."""
+        rollback_ok = self._rollback_files(ws_repo, backups, added_paths)
+        if not rollback_ok:
+            return False
+        try:
+            post_rb_snap = _compute_snapshot_sha256(ws_repo, source_path)
+            post_rb_diff = _compute_git_diff_sha256(
+                ws_repo,
+                base_ref,
+                source_path,
+                timeout_seconds=self.config.git_timeout_seconds,
+            )
+        except WorkspaceError:
+            return False
+        return hmac.compare_digest(
+            post_rb_snap, expected_source_snapshot_sha256
+        ) and hmac.compare_digest(post_rb_diff, expected_git_diff_sha256)
 
     def apply(
         self,
@@ -1214,8 +1303,15 @@ class PatchApplicator:
                     check=False,
                 )
         except subprocess.TimeoutExpired:
-            self._rollback_files(ws_repo, backups, added_paths)
-            clean_ok = _compute_snapshot_sha256(ws_repo, source_path) == expected_source_snapshot_sha256
+            clean_ok = self._rollback_and_verify_clean(
+                ws_repo,
+                backups,
+                added_paths,
+                source_path=source_path,
+                base_ref=base_ref,
+                expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                expected_git_diff_sha256=expected_git_diff_sha256,
+            )
             return _failed(
                 "PATCH_APPLICATION_TIMEOUT",
                 f"git apply timed out after {self.config.git_timeout_seconds}s.",
@@ -1223,8 +1319,15 @@ class PatchApplicator:
                 clean_after_rollback=clean_ok,
             )
         except Exception as exc:  # noqa: BLE001
-            self._rollback_files(ws_repo, backups, added_paths)
-            clean_ok = _compute_snapshot_sha256(ws_repo, source_path) == expected_source_snapshot_sha256
+            clean_ok = self._rollback_and_verify_clean(
+                ws_repo,
+                backups,
+                added_paths,
+                source_path=source_path,
+                base_ref=base_ref,
+                expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                expected_git_diff_sha256=expected_git_diff_sha256,
+            )
             return _failed(
                 "PATCH_APPLICATION_FAILED",
                 f"Unexpected error executing git apply: {exc}",
@@ -1238,14 +1341,15 @@ class PatchApplicator:
                 if isinstance(proc.stderr, bytes)
                 else str(proc.stderr or "")
             )
-            self._rollback_files(ws_repo, backups, added_paths)
-            try:
-                post_rb_snap = _compute_snapshot_sha256(ws_repo, source_path)
-                clean_ok = hmac.compare_digest(
-                    post_rb_snap, expected_source_snapshot_sha256
-                )
-            except WorkspaceError:
-                clean_ok = False
+            clean_ok = self._rollback_and_verify_clean(
+                ws_repo,
+                backups,
+                added_paths,
+                source_path=source_path,
+                base_ref=base_ref,
+                expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                expected_git_diff_sha256=expected_git_diff_sha256,
+            )
             return _failed(
                 "PATCH_APPLICATION_FAILED",
                 f"git apply failed (exit_code={proc.returncode}): {stderr or 'patch could not be applied'}",
@@ -1264,10 +1368,14 @@ class PatchApplicator:
                 check=False,
             )
             if add_proc.returncode != 0:
-                self._rollback_files(ws_repo, backups, added_paths)
-                clean_ok = (
-                    _compute_snapshot_sha256(ws_repo, source_path)
-                    == expected_source_snapshot_sha256
+                clean_ok = self._rollback_and_verify_clean(
+                    ws_repo,
+                    backups,
+                    added_paths,
+                    source_path=source_path,
+                    base_ref=base_ref,
+                    expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                    expected_git_diff_sha256=expected_git_diff_sha256,
                 )
                 return _failed(
                     "PATCH_STAGE_ADDED_FAILED",
@@ -1286,21 +1394,37 @@ class PatchApplicator:
                 timeout_seconds=self.config.git_timeout_seconds,
             )
         except WorkspaceError as exc:
-            self._rollback_files(ws_repo, backups, added_paths)
+            clean_ok = self._rollback_and_verify_clean(
+                ws_repo,
+                backups,
+                added_paths,
+                source_path=source_path,
+                base_ref=base_ref,
+                expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                expected_git_diff_sha256=expected_git_diff_sha256,
+            )
             return _failed(
                 "POST_PATCH_SNAPSHOT_FAILED",
                 f"Failed to compute post-patch workspace snapshot: {exc}",
                 rollback_performed=True,
-                clean_after_rollback=None,
+                clean_after_rollback=clean_ok,
             )
 
         if hmac.compare_digest(resulting_snapshot, expected_source_snapshot_sha256):
-            self._rollback_files(ws_repo, backups, added_paths)
+            clean_ok = self._rollback_and_verify_clean(
+                ws_repo,
+                backups,
+                added_paths,
+                source_path=source_path,
+                base_ref=base_ref,
+                expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+                expected_git_diff_sha256=expected_git_diff_sha256,
+            )
             return _failed(
                 "PATCH_NO_EFFECTIVE_CHANGE",
                 "Patch application completed without changing the workspace source snapshot.",
                 rollback_performed=True,
-                clean_after_rollback=True,
+                clean_after_rollback=clean_ok,
             )
 
         return PatchApplicationResult(

@@ -246,7 +246,8 @@ async def submit_test_review(
     if (
         payload.approved
         and approved_specs is not None
-        and updated.state == WorkflowState.RUNNING_VERIFICATION
+        and updated.state
+        in {WorkflowState.PREPARING_BASELINE, WorkflowState.RUNNING_VERIFICATION}
     ):
         try:
             executor.submit(

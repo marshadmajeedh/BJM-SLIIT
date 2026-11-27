@@ -65,9 +65,13 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `ANALYZING_POST_PATCH_IMPACT` | Active | (`generate_and_verify_change`) M01 post-patch diff & reverse-dependency impact analysis | Poll `GET /api/runs/{run_id}` |
 | `GENERATING_TESTS` | Active | M03 generating unexecuted test proposals | Poll `GET /api/runs/{run_id}` |
 | `AWAITING_TEST_REVIEW` | **Paused Gate 1** | Proposals ready; **no tests exported or executed yet** | Stop polling; render patch/impact evidence + M03 scenarios; enable `POST /test-review` |
-| `RUNNING_VERIFICATION` | Active | Selected approved tests exported & running under M04 `pytest` | Poll `GET /api/runs/{run_id}` |
+| `PREPARING_BASELINE` | Active | Cloning resolved baseline commit & mirroring identical approved test SHA-256s | Poll `GET /api/runs/{run_id}` |
+| `RUNNING_BASELINE_VERIFICATION` | Active | Executing identical approved tests (+ existing repo regression suite if present) on baseline commit | Poll `GET /api/runs/{run_id}` |
+| `RUNNING_MODIFIED_VERIFICATION` | Active | Executing identical approved tests (+ existing repo regression suite if present) on modified workspace | Poll `GET /api/runs/{run_id}` |
+| `COMPARING_VERIFICATION_RESULTS` | Active | Deterministic baseline-vs-modified comparison & regression classification | Poll `GET /api/runs/{run_id}` |
+| `RUNNING_VERIFICATION` | Active *(legacy)* | Legacy verification state retained for backward compatibility | Poll `GET /api/runs/{run_id}` |
 | `COMPILING_REPORT` | Active | Aggregating auditable `ChangePackageReport` | Poll `GET /api/runs/{run_id}` |
-| `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render evidence, risk, limitations, logs; enable `POST /decision` |
+| `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render baseline comparison, evidence, risk, limitations, logs; enable `POST /decision` |
 | `COMPLETED_NO_CHANGES` | Terminal | (`verify_existing_change`) Zero tracked Python changes found; M03 & M04 skipped (**not verification proof**) | Display informational notice; stop polling |
 | `APPROVED` | Terminal | Final human approval recorded (**no Git commit/merge/push performed**) | Display decision badge; stop polling |
 | `REJECTED` | Terminal | Rejected at Gate 1 (tests) or Gate 2 (change package) | Display rejection notes; stop polling |
@@ -75,12 +79,12 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `FAILED` | Terminal | Unrecoverable adapter, workspace, patch safety, missing A4, ambiguity block, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
 
 ### Polling Recommendations
-- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
+- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `PREPARING_BASELINE`, `RUNNING_BASELINE_VERIFICATION`, `RUNNING_MODIFIED_VERIFICATION`, `COMPARING_VERIFICATION_RESULTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
 - **Stop polling immediately** when `state` enters `AWAITING_TEST_REVIEW`, `AWAITING_FINAL_APPROVAL`, or any terminal state (`COMPLETED_NO_CHANGES`, `APPROVED`, `REJECTED`, `NEEDS_REVIEW`, `FAILED`).
 - Use `allowed_actions` from `GET /api/runs/{run_id}` to enable/disable buttons cleanly:
   - `["submit_test_review"]` -> enable Gate 1 approval/rejection controls.
   - `["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]` -> enable all Gate 2 buttons.
-  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, mandatory unresolved requirement ambiguities remain open, or a `generate_and_verify_change` run lacks applied patch evidence).
+  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, a confirmed newly introduced regression was detected against baseline, mandatory unresolved requirement ambiguities remain open, or a `generate_and_verify_change` run lacks applied patch evidence).
 
 ---
 
@@ -467,7 +471,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
 }
 ```
 - Only stable scenario IDs belonging to the run are accepted (arbitrary file paths are rejected with `422`).
-- Exports **only** `selected_test_ids`, hashes exported files, transitions atomically to `RUNNING_VERIFICATION`, and schedules M04 execution.
+- Exports **only** `selected_test_ids`, hashes exported files, transitions atomically to `PREPARING_BASELINE`, and schedules baseline + modified verification and comparison.
 - Duplicate or concurrent approval calls return `409 Conflict`.
 
 **Reject Generated Proposals (`TestReviewRequest`) -> `200 OK`:**
@@ -499,6 +503,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
 }
 ```
 - Approving when verification failed, timed out, had collection/zero-test errors, or was unavailable returns `409 Conflict` (`code: "VERIFICATION_APPROVAL_BLOCKED"`).
+- Approving when baseline-versus-modified comparison confirmed a newly introduced mandatory regression (including in an existing repository regression suite) returns `409 Conflict` (`code: "REGRESSION_APPROVAL_BLOCKED"`).
 - Approving when A1 detected mandatory unresolved requirement ambiguities returns `409 Conflict` (`code: "UNRESOLVED_REQUIREMENT_AMBIGUITY"`).
 - Final decisions never commit, merge, push, deploy, or modify the original repository.
 
@@ -522,7 +527,7 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 | :--- | :--- | :--- |
 | `403 Forbidden` | Repository path or ID outside server allowlist | `REPOSITORY_ACCESS_DENIED` |
 | `404 Not Found` | Unknown workflow `run_id` | `RUN_NOT_FOUND` |
-| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `VERIFICATION_APPROVAL_BLOCKED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
+| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `BASELINE_WORKSPACE_TAMPERED`, `VERIFICATION_APPROVAL_BLOCKED`, `REGRESSION_APPROVAL_BLOCKED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
 | `422 Unprocessable Content` | Invalid request DTO or unknown scenario ID for run | `VALIDATION_ERROR`, `UNKNOWN_SCENARIO_ID` |
 | `503 Service Unavailable` | Database or required local infrastructure failure | `INFRASTRUCTURE_UNAVAILABLE` |
 | `500 Internal Server Error` | Unexpected server error (safe generic message) | `INTERNAL_SERVER_ERROR` |
@@ -550,4 +555,4 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 2. **No OS/container sandbox:** Git workspace isolation is not an OS security sandbox. Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled.
 3. **No authentication layer:** Reviewer labels are unauthenticated local metadata.
 4. **A4 patch generation agent unimplemented (integration infrastructure ready):** `PatchGenerationAdapter` and controlled patch validation/application are ready for dependency injection of the future teammate-owned A4 agent (`PATCH_GENERATOR_UNAVAILABLE` until connected); `max_repair_attempts` remains reserved.
-5. **No baseline-vs-modified regression comparison, coverage measurement, or AI root-cause analysis:** Explicitly reported as `unavailable` in responses rather than fabricated.
+5. **M04 itemized test-node reporting, coverage, and AI root-cause analysis remain limited:** Baseline-versus-modified verification comparison is implemented in M02 (`docs/m02/BASELINE_VERIFICATION_INTEGRATION.md`), but unmodified M04 `report_parser.py` omits individual passed pytest node IDs; code coverage and AI root-cause analysis remain explicitly reported as `unavailable` rather than fabricated.

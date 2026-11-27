@@ -37,6 +37,7 @@ from project.schemas.agents import (
     CodebaseAnalysisResult,
     GeneratedTestScenario,
     TestGenerationResult,
+    TestPurpose,
 )
 from project.schemas.requirements import RequirementAnalysisResult
 from project.schemas.workflow import ExecutionMode
@@ -415,6 +416,43 @@ class TestingAdapter:
                 if parsed_cids:
                     any_explicit_criterion_mapping = True
 
+            raw_purpose = item.get("test_purpose")
+            parsed_purpose = TestPurpose.UNKNOWN
+            if raw_purpose is not None:
+                if not isinstance(raw_purpose, str):
+                    return TestGenerationResult(
+                        status="error",
+                        executed=False,
+                        generation_mode=mode_value,
+                        is_mock_output=is_offline,
+                        model_label=resolved_label,
+                        raw_proposals=raw_proposals,
+                        error=AgentError(
+                            code="INVALID_TEST_PURPOSE",
+                            message=(
+                                f"Scenario #{idx} returned non-string 'test_purpose'."
+                            ),
+                        ),
+                    )
+                try:
+                    parsed_purpose = TestPurpose(raw_purpose.strip())
+                except ValueError:
+                    return TestGenerationResult(
+                        status="error",
+                        executed=False,
+                        generation_mode=mode_value,
+                        is_mock_output=is_offline,
+                        model_label=resolved_label,
+                        raw_proposals=raw_proposals,
+                        error=AgentError(
+                            code="INVALID_TEST_PURPOSE",
+                            message=(
+                                f"Scenario #{idx} returned unsupported test_purpose "
+                                f"{raw_purpose!r}."
+                            ),
+                        ),
+                    )
+
             scenarios.append(
                 GeneratedTestScenario(
                     scenario_id=f"SCN-{idx:03d}",
@@ -425,6 +463,7 @@ class TestingAdapter:
                     content_sha256=_sha256_bytes(test_code.encode("utf-8")),
                     approved=False,
                     criterion_ids=parsed_cids,
+                    test_purpose=parsed_purpose,
                 )
             )
 
