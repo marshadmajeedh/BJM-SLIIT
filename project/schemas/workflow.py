@@ -254,6 +254,8 @@ class HumanDecisionRecord(BaseModel):
     reviewer: str = Field(..., min_length=1, max_length=200)
     comments: str = Field(default="", max_length=4000)
     decided_at: datetime = Field(default_factory=utc_now)
+    evidence_package_id: str | None = None
+    evidence_package_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class RepositoryInfo(BaseModel):
@@ -265,7 +267,9 @@ class RepositoryInfo(BaseModel):
     repository_path: str = Field(..., min_length=1)
     source_path: str = Field(default=".", min_length=1)
     base_ref: str = Field(default="HEAD", min_length=1)
+    effective_base_ref: str | None = None
     resolved_base_commit: str | None = None
+    head_commit: str | None = None
     change_mode: Literal["working_tree", "committed_range", "unknown"] = "unknown"
 
 
@@ -281,6 +285,8 @@ class WorkflowRunRecord(BaseModel):
     repository: RepositoryInfo
     workspace_id: str | None = None
     workspace_path: str | None = None
+    source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    git_diff_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     agent_records: list[AgentExecutionRecord] = Field(default_factory=list)

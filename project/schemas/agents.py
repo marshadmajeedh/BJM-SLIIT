@@ -301,13 +301,24 @@ class ChangePackageReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    package_id: str | None = None
+    package_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     run_id: str = Field(..., min_length=1)
     generated_at: datetime = Field(default_factory=utc_now)
     requirements: str = Field(..., min_length=1)
+    repository_id: str | None = None
     repository_path: str = Field(..., min_length=1)
     source_path: str = Field(..., min_length=1)
     base_ref: str = Field(..., min_length=1)
     resolved_base_commit: str | None = None
+    change_mode: str = "unknown"
+    execution_mode: str = "offline_test"
+    model_label: str | None = None
+    is_mock_output: bool | None = None
+    changed_files: list[str] = Field(default_factory=list)
+    impacted_modules: list[str] = Field(default_factory=list)
+    approved_scenario_ids: list[str] = Field(default_factory=list)
+    executed_scenario_ids: list[str] = Field(default_factory=list)
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     verification: VerificationResult | None = None
@@ -315,5 +326,16 @@ class ChangePackageReport(BaseModel):
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"] = (
         "needs_review"
     )
+    recommendation_label: Literal[
+        "ready_for_human_review",
+        "verification_failed",
+        "verification_incomplete",
+        "additional_review_required",
+        "no_changes",
+    ] = "additional_review_required"
+    recommendation_summary: str = ""
+    unverified_requirements: list[str] = Field(default_factory=list)
+    traceability: dict[str, Any] = Field(default_factory=dict)
+    agent_communication_summary: list[dict[str, Any]] = Field(default_factory=list)
     evidence_limitations: list[str] = Field(default_factory=list)
     human_approval_required: bool = True
