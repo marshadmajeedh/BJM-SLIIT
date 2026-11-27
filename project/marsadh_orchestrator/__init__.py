@@ -1,6 +1,25 @@
-"""ChangeGuard AI Module 02 — Foundation package (config, store, workspace, adapters)."""
+"""ChangeGuard AI Module 02 — Orchestration engine, config, store, workspace, adapters."""
 
 from .config import OrchestratorConfig
+from .orchestrator import (
+    ACTIVE_EXECUTION_STATES,
+    ALLOWED_TRANSITIONS,
+    PAUSED_REVIEW_STATES,
+    TERMINAL_STATES,
+    InfrastructureUnavailableError,
+    InvalidStateTransitionError,
+    OrchestratorError,
+    OrchestratorService,
+    RepositoryAccessDeniedError,
+    ReviewConflictError,
+    RunNotFoundError,
+    ValidationInputError,
+    WorkflowIntegrityError,
+    compute_git_diff_sha256,
+    compute_source_snapshot_sha256,
+    default_offline_model_stub,
+    validate_transition,
+)
 from .store import RunStore, generate_log_id, generate_run_id, redact_secrets
 from .workspace import (
     UnsupportedWorkspaceStateError,
@@ -11,14 +30,31 @@ from .workspace import (
 )
 
 __all__ = [
+    "ACTIVE_EXECUTION_STATES",
+    "ALLOWED_TRANSITIONS",
+    "InfrastructureUnavailableError",
+    "InvalidStateTransitionError",
     "OrchestratorConfig",
+    "OrchestratorError",
+    "OrchestratorService",
+    "PAUSED_REVIEW_STATES",
+    "RepositoryAccessDeniedError",
+    "ReviewConflictError",
+    "RunNotFoundError",
     "RunStore",
+    "TERMINAL_STATES",
     "UnsupportedWorkspaceStateError",
+    "ValidationInputError",
+    "WorkflowIntegrityError",
     "WorkspaceContext",
     "WorkspaceError",
     "WorkspaceManager",
     "WorkspaceSecurityError",
+    "compute_git_diff_sha256",
+    "compute_source_snapshot_sha256",
+    "default_offline_model_stub",
     "generate_log_id",
     "generate_run_id",
     "redact_secrets",
+    "validate_transition",
 ]

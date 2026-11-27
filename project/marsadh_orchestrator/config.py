@@ -45,10 +45,36 @@ class OrchestratorConfig(BaseModel):
     groq_model: str | None = Field(default=None, max_length=160)
     groq_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     max_repair_attempts: int = Field(default=2, ge=0, le=2)
+    max_concurrent_runs: int = Field(default=4, ge=1, le=32)
     app_host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     app_port: int = Field(default=8000, ge=1, le=65535)
+    cors_allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
     environment: Literal["development", "test", "production"] = "development"
     allow_untrusted_execution: Literal[False] = False
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _validate_cors_origins(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for origin in value:
+            item = origin.strip().rstrip("/")
+            if not item:
+                continue
+            if item == "*":
+                raise ValueError(
+                    "Wildcard '*' is not allowed in cors_allowed_origins; "
+                    "specify explicit local origins"
+                )
+            if item not in cleaned:
+                cleaned.append(item)
+        return cleaned
 
     @field_validator("groq_model", "app_host")
     @classmethod
@@ -182,10 +208,32 @@ class OrchestratorConfig(BaseModel):
             kwargs["max_repair_attempts"] = int(
                 source["CHANGEGUARD_MAX_REPAIR_ATTEMPTS"]
             )
+        if source.get("CHANGEGUARD_MAX_CONCURRENT_RUNS"):
+            kwargs["max_concurrent_runs"] = int(
+                source["CHANGEGUARD_MAX_CONCURRENT_RUNS"]
+            )
         if source.get("CHANGEGUARD_APP_HOST"):
             kwargs["app_host"] = source["CHANGEGUARD_APP_HOST"].strip()
         if source.get("CHANGEGUARD_APP_PORT"):
             kwargs["app_port"] = int(source["CHANGEGUARD_APP_PORT"])
+        if source.get("CHANGEGUARD_CORS_ORIGINS"):
+            kwargs["cors_allowed_origins"] = [
+                part.strip()
+                for part in source["CHANGEGUARD_CORS_ORIGINS"].split(",")
+                if part.strip()
+            ]
+        if source.get("CHANGEGUARD_CONFIGURED_REPOSITORIES"):
+            configured: dict[str, Path] = {}
+            for entry in source["CHANGEGUARD_CONFIGURED_REPOSITORIES"].split(","):
+                item = entry.strip()
+                if not item or "=" not in item:
+                    continue
+                repo_id, repo_raw = item.split("=", 1)
+                repo_id = repo_id.strip()
+                repo_raw = repo_raw.strip()
+                if repo_id and repo_raw:
+                    configured[repo_id] = Path(repo_raw)
+            kwargs["configured_repositories"] = configured
         if source.get("CHANGEGUARD_ENV"):
             kwargs["environment"] = source["CHANGEGUARD_ENV"].strip()
 
