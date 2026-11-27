@@ -22,6 +22,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ._common import STABLE_ID_PATTERN, AgentError, utc_now
 from .requirements import RequirementAnalysisResult, RequirementTraceability
+from .verification import (
+    BaselineComparisonEvidence,
+    BaselineVerificationResult,
+    FailureDiagnostic,
+    IndividualTestOutcome,
+    ModifiedVerificationResult,
+    RegressionComparisonSummary,
+    SuiteExecutionSummary,
+    TestComparisonClassification,
+    TestComparisonResult,
+    TestExecutionEvidence,
+    TestPurpose,
+    TestSuiteKind,
+    VerificationComparisonStatus,
+    VerificationOutcome,
+)
 
 
 class AgentExecutionStatus(str, Enum):
@@ -130,6 +146,7 @@ class GeneratedTestScenario(BaseModel):
     exported_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     approved: bool = False
     criterion_ids: list[str] = Field(default_factory=list)
+    test_purpose: TestPurpose = TestPurpose.UNKNOWN
 
     @field_validator("criterion_ids")
     @classmethod
@@ -183,32 +200,6 @@ class TestGenerationResult(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
-class VerificationOutcome(str, Enum):
-    """Semantic outcome distinguishing verification pass from failures/errors."""
-
-    PASSED = "passed"
-    FAILED_TESTS = "failed_tests"
-    COLLECTION_ERROR = "collection_error"
-    NO_TESTS_COLLECTED = "no_tests_collected"
-    TIMEOUT = "timeout"
-    EXECUTION_ERROR = "execution_error"
-    UNAVAILABLE = "unavailable"
-
-
-class FailureDiagnostic(BaseModel):
-    """Structured failure evidence enriched with M04 failure_analyzer output."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    test_name: str = Field(..., min_length=1)
-    status: str = Field(..., min_length=1)
-    evidence: str = ""
-    error_type: str = "Unknown"
-    reason: str = "Further analysis required"
-    risk: str = "unknown"
-    recommendation: str = "Review failure evidence"
-
-
 class RiskSummary(BaseModel):
     """Explicit risk summary that reports Unknown rather than fabricating scores."""
 
@@ -221,24 +212,6 @@ class RiskSummary(BaseModel):
         "Risk could not be reliably calculated from available verification evidence."
     )
     evidence_available: bool = False
-
-
-class BaselineComparisonEvidence(BaseModel):
-    """Placeholder interface for future baseline-versus-modified regression runs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["unavailable", "completed"] = "unavailable"
-    baseline_ref: str | None = None
-    baseline_passed: int | None = Field(default=None, ge=0)
-    baseline_failed: int | None = Field(default=None, ge=0)
-    modified_passed: int | None = Field(default=None, ge=0)
-    modified_failed: int | None = Field(default=None, ge=0)
-    newly_failing_tests: list[str] | None = None
-    notes: str = (
-        "Baseline-versus-modified comparison was not executed; running generated tests "
-        "against the modified repository alone is not proof of regression safety."
-    )
 
 
 class VerificationResult(BaseModel):
@@ -327,6 +300,9 @@ class ChangePackageReport(BaseModel):
     original_source_snapshot_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    baseline_source_snapshot_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     resulting_source_snapshot_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -338,7 +314,11 @@ class ChangePackageReport(BaseModel):
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     verification: VerificationResult | None = None
+    baseline_verification: BaselineVerificationResult | None = None
+    modified_verification: ModifiedVerificationResult | None = None
+    baseline_comparison: BaselineComparisonEvidence | None = None
     risk_summary: RiskSummary = Field(default_factory=RiskSummary)
+    complete_requirement_assurance: bool = False
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"] = (
         "needs_review"
     )

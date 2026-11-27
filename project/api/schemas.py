@@ -15,13 +15,20 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from project.marsadh_orchestrator.store import redact_nested_secrets, redact_secrets
+from project.marsadh_orchestrator.store import (
+    _sanitize_baseline_comparison,
+    _sanitize_baseline_verification,
+    _sanitize_modified_verification,
+    redact_nested_secrets,
+    redact_secrets,
+)
 from project.schemas import (
     AcceptanceCriterion,
     AgentError,
     AgentExecutionRecord,
     AgentLogEntry,
     BaselineComparisonEvidence,
+    BaselineVerificationResult,
     BusinessConstraint,
     ChangedFileImpact,
     ChangePackageReport,
@@ -30,6 +37,7 @@ from project.schemas import (
     FailureDiagnostic,
     GeneratedTestScenario,
     HumanDecisionRecord,
+    ModifiedVerificationResult,
     PatchApplicationResult,
     PatchFileChange,
     PatchGenerationResult,
@@ -44,6 +52,7 @@ from project.schemas import (
     RiskSummary,
     TestGenerationResult,
     TestReviewRecord,
+    VerificationComparisonStatus,
     VerificationOutcome,
     VerificationResult,
     WorkflowMode,
@@ -319,13 +328,18 @@ class ChangePackageResponse(BaseModel):
     patch_is_deterministic_fixture: bool | None = None
     patch_applied: bool | None = None
     original_source_snapshot_sha256: str | None = None
+    baseline_source_snapshot_sha256: str | None = None
     resulting_source_snapshot_sha256: str | None = None
     changed_files: list[str] = Field(default_factory=list)
     impacted_modules: list[str] = Field(default_factory=list)
     approved_scenario_ids: list[str] = Field(default_factory=list)
     executed_scenario_ids: list[str] = Field(default_factory=list)
     requirement_analysis: RequirementAnalysisResponse | None = None
+    baseline_verification: BaselineVerificationResult | None = None
+    modified_verification: ModifiedVerificationResult | None = None
+    baseline_comparison: BaselineComparisonEvidence | None = None
     risk_summary: RiskSummary = Field(default_factory=RiskSummary)
+    complete_requirement_assurance: bool = False
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"]
     recommendation_label: Literal[
         "ready_for_human_review",
@@ -364,6 +378,8 @@ class RunSummaryResponse(BaseModel):
     proposed_scenario_count: int = 0
     verification_outcome: VerificationOutcome | None = None
     verification_passed: bool | None = None
+    baseline_comparison_status: VerificationComparisonStatus | None = None
+    has_confirmed_regression: bool = False
     has_error: bool = False
 
 
@@ -392,6 +408,7 @@ class RunDetailResponse(BaseModel):
     repository: RepositorySummaryResponse
     original_source_snapshot_sha256: str | None = None
     original_git_diff_sha256: str | None = None
+    baseline_source_snapshot_sha256: str | None = None
     source_snapshot_sha256: str | None = None
     git_diff_sha256: str | None = None
     patch_proposal_sha256: str | None = None
@@ -408,6 +425,9 @@ class RunDetailResponse(BaseModel):
     codebase_analysis: CodebaseAnalysisResponse | None = None
     test_generation: TestGenerationResponse | None = None
     test_review: TestReviewRecord | None = None
+    baseline_verification: BaselineVerificationResult | None = None
+    modified_verification: ModifiedVerificationResult | None = None
+    baseline_comparison: BaselineComparisonEvidence | None = None
     verification: VerificationResponse | None = None
     report: ChangePackageResponse | None = None
     final_decision: HumanDecisionRecord | None = None
@@ -448,10 +468,19 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
             run.workflow_mode != WorkflowMode.GENERATE_AND_VERIFY_CHANGE
             or (run.patch_application is not None and run.patch_application.applied)
         )
+        active_comparison = (
+            run.baseline_comparison
+            or (run.verification.baseline_comparison if run.verification is not None else None)
+        )
+        has_confirmed_regression = bool(
+            active_comparison is not None
+            and active_comparison.summary.blocks_ordinary_approval
+        )
         if (
             run.verification is not None
             and run.verification.verification_passed
             and not has_blocking_ambiguity
+            and not has_confirmed_regression
             and patch_ready
         ):
             return [
@@ -663,7 +692,10 @@ def _to_verification_response(
         coverage_percent=ver.coverage_percent,
         coverage_status=ver.coverage_status,
         ai_root_cause_status=ver.ai_root_cause_status,
-        baseline_comparison=ver.baseline_comparison,
+        baseline_comparison=(
+            _sanitize_baseline_comparison(ver.baseline_comparison)
+            or ver.baseline_comparison
+        ),
         stdout_excerpt=redact_secrets(ver.stdout_excerpt),
         stderr_excerpt=redact_secrets(ver.stderr_excerpt),
         error=_sanitize_error(ver.error),
@@ -696,6 +728,7 @@ def _to_report_response(
         patch_is_deterministic_fixture=report.patch_is_deterministic_fixture,
         patch_applied=report.patch_applied,
         original_source_snapshot_sha256=report.original_source_snapshot_sha256,
+        baseline_source_snapshot_sha256=report.baseline_source_snapshot_sha256,
         resulting_source_snapshot_sha256=report.resulting_source_snapshot_sha256,
         changed_files=list(report.changed_files),
         impacted_modules=list(report.impacted_modules),
@@ -704,7 +737,15 @@ def _to_report_response(
         requirement_analysis=_to_requirement_analysis_response(
             report.requirement_analysis
         ),
+        baseline_verification=_sanitize_baseline_verification(
+            report.baseline_verification
+        ),
+        modified_verification=_sanitize_modified_verification(
+            report.modified_verification
+        ),
+        baseline_comparison=_sanitize_baseline_comparison(report.baseline_comparison),
         risk_summary=report.risk_summary,
+        complete_requirement_assurance=report.complete_requirement_assurance,
         recommendation=report.recommendation,
         recommendation_label=report.recommendation_label,
         recommendation_summary=report.recommendation_summary,
@@ -770,6 +811,25 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
         verification_passed=(
             run.verification.verification_passed if run.verification else None
         ),
+        baseline_comparison_status=(
+            run.baseline_comparison.status
+            if run.baseline_comparison is not None
+            else (
+                run.verification.baseline_comparison.status
+                if run.verification is not None
+                else None
+            )
+        ),
+        has_confirmed_regression=bool(
+            (
+                run.baseline_comparison is not None
+                and run.baseline_comparison.summary.has_confirmed_regression
+            )
+            or (
+                run.verification is not None
+                and run.verification.baseline_comparison.summary.has_confirmed_regression
+            )
+        ),
         has_error=run.error is not None,
     )
 
@@ -794,6 +854,7 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         ),
         original_source_snapshot_sha256=run.original_source_snapshot_sha256,
         original_git_diff_sha256=run.original_git_diff_sha256,
+        baseline_source_snapshot_sha256=run.baseline_source_snapshot_sha256,
         source_snapshot_sha256=run.source_snapshot_sha256,
         git_diff_sha256=run.git_diff_sha256,
         patch_proposal_sha256=run.patch_proposal_sha256,
@@ -820,6 +881,9 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         codebase_analysis=_to_codebase_response(run.codebase_analysis),
         test_generation=_to_test_generation_response(run.test_generation),
         test_review=run.test_review,
+        baseline_verification=_sanitize_baseline_verification(run.baseline_verification),
+        modified_verification=_sanitize_modified_verification(run.modified_verification),
+        baseline_comparison=_sanitize_baseline_comparison(run.baseline_comparison),
         verification=_to_verification_response(run.verification),
         report=_to_report_response(run.report),
         final_decision=run.final_decision,
