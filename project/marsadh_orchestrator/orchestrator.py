@@ -30,11 +30,13 @@ from typing import Any
 
 from project.marsadh_orchestrator.adapters import (
     CodebaseAdapter,
+    PatchGenerationAdapter,
     TestingAdapter,
     VerificationAdapter,
     build_approved_test_specs,
 )
 from project.marsadh_orchestrator.config import OrchestratorConfig
+from project.marsadh_orchestrator.patch_engine import PatchApplicator, PatchValidator
 from project.marsadh_orchestrator.requirement_analyst import (
     DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     RequirementAnalystAgent,
@@ -61,6 +63,9 @@ from project.schemas import (
     HumanDecision,
     HumanDecisionRecord,
     HumanDecisionRequest,
+    PatchGenerationRequest,
+    PatchGenerationResult,
+    PatchModelMetadata,
     RepositoryInfo,
     RequirementAnalysisResult,
     RequirementTraceability,
@@ -71,6 +76,7 @@ from project.schemas import (
     TraceabilityEvidenceStatus,
     VerificationOutcome,
     VerificationResult,
+    WorkflowMode,
     WorkflowRunRecord,
     WorkflowState,
 )
@@ -99,6 +105,11 @@ ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
         WorkflowState.CREATED,
         WorkflowState.ANALYZING_REQUIREMENTS,
         WorkflowState.ANALYZING_CODEBASE,
+        WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+        WorkflowState.GENERATING_PATCH,
+        WorkflowState.VALIDATING_PATCH,
+        WorkflowState.APPLYING_PATCH,
+        WorkflowState.ANALYZING_POST_PATCH_IMPACT,
         WorkflowState.GENERATING_TESTS,
         WorkflowState.RUNNING_VERIFICATION,
         WorkflowState.COMPILING_REPORT,
@@ -115,6 +126,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.ANALYZING_REQUIREMENTS: frozenset(
         {
             WorkflowState.ANALYZING_CODEBASE,
+            WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
             WorkflowState.FAILED,
         }
     ),
@@ -122,6 +134,36 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         {
             WorkflowState.GENERATING_TESTS,
             WorkflowState.COMPLETED_NO_CHANGES,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT: frozenset(
+        {
+            WorkflowState.GENERATING_PATCH,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.GENERATING_PATCH: frozenset(
+        {
+            WorkflowState.VALIDATING_PATCH,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.VALIDATING_PATCH: frozenset(
+        {
+            WorkflowState.APPLYING_PATCH,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.APPLYING_PATCH: frozenset(
+        {
+            WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.ANALYZING_POST_PATCH_IMPACT: frozenset(
+        {
+            WorkflowState.GENERATING_TESTS,
             WorkflowState.FAILED,
         }
     ),
@@ -519,6 +561,9 @@ class OrchestratorService:
         verification_adapter: VerificationAdapter,
         *,
         requirement_analyst: RequirementAnalystAgent | None = None,
+        patch_adapter: PatchGenerationAdapter | None = None,
+        patch_validator: PatchValidator | None = None,
+        patch_applicator: PatchApplicator | None = None,
         requirement_offline_callable: Callable[[str], str] | None = None,
         requirement_offline_label: str = DEFAULT_OFFLINE_REQUIREMENT_LABEL,
         requirement_live_callable: Callable[[str], str] | None = None,
@@ -540,6 +585,9 @@ class OrchestratorService:
             live_model_label=requirement_live_label,
         )
         self.codebase_adapter = codebase_adapter
+        self.patch_adapter = patch_adapter or PatchGenerationAdapter(config=config)
+        self.patch_validator = patch_validator or PatchValidator(config=config)
+        self.patch_applicator = patch_applicator or PatchApplicator(config=config)
         self.testing_adapter = testing_adapter
         self.verification_adapter = verification_adapter
         self._offline_model_callable = (
@@ -787,6 +835,7 @@ class OrchestratorService:
             run_id=run_id,
             state=WorkflowState.CREATED,
             requirements=request.requirements,
+            workflow_mode=request.workflow_mode,
             execution_mode=request.execution_mode,
             repository=RepositoryInfo(
                 repository_id=request.repository_id,
@@ -812,6 +861,7 @@ class OrchestratorService:
             input_summary=(
                 f"repo_id={request.repository_id or '<path>'}, "
                 f"source_path={request.source_path}, base_ref={request.base_ref}, "
+                f"workflow_mode={request.workflow_mode.value}, "
                 f"mode={request.execution_mode.value}"
             ),
             output_summary="Workflow run created and persisted.",
@@ -952,6 +1002,8 @@ class OrchestratorService:
                 update={
                     "workspace_id": ws_ctx.workspace_id,
                     "workspace_path": ws_ctx.workspace_repo_path,
+                    "original_source_snapshot_sha256": snapshot_sha,
+                    "original_git_diff_sha256": diff_sha,
                     "source_snapshot_sha256": snapshot_sha,
                     "git_diff_sha256": diff_sha,
                     "repository": current.repository.model_copy(
@@ -1081,179 +1133,192 @@ class OrchestratorService:
             output_summary=a1_summary,
         )
 
-        run = self.transition_state(
-            run_id,
-            WorkflowState.ANALYZING_REQUIREMENTS,
-            WorkflowState.ANALYZING_CODEBASE,
-            updater=lambda current: current.model_copy(
-                update={
-                    "requirement_analysis": req_result,
-                    "agent_records": [*current.agent_records, a1_rec],
-                }
-            ),
-            reason=(
-                f"A1 requirement analysis completed ({req_result.status}); "
-                "starting M01 codebase analysis."
-            ),
-        )
-
-        # ---- Stage 2: M01 Codebase Analysis ----
-        m01_started = utc_now()
-        m01_t0 = time.perf_counter()
-        self._log(
-            run_id=run_id,
-            agent_name="CodebaseAdapter",
-            stage=WorkflowState.ANALYZING_CODEBASE,
-            status=AgentExecutionStatus.SUCCEEDED,
-            input_summary=(
-                f"Analyzing workspace source_path={ws_ctx.source_path} "
-                f"against effective_base_ref={ws_ctx.effective_base_ref}"
-            ),
-            output_summary="Invoked M01 CodebaseAdapter.analyze.",
-        )
-        try:
-            cb_result = self.codebase_adapter.analyze(
-                ws_ctx.workspace_repo_path,
-                source_path=ws_ctx.source_path,
-                base_ref=ws_ctx.effective_base_ref,
-            )
-        except Exception as exc:  # noqa: BLE001
-            m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
-            err = AgentError(
-                code="M01_UNEXPECTED_ERROR",
-                message=f"CodebaseAdapter raised an unexpected exception: {exc}",
-            )
-            self._log(
+        if run.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
+            run, cb_result = self._execute_patch_generation_pipeline(
                 run_id=run_id,
-                agent_name="CodebaseAdapter",
-                stage=WorkflowState.ANALYZING_CODEBASE,
-                status=AgentExecutionStatus.FAILED,
-                duration_ms=m01_dur_ms,
-                output_summary="M01 codebase analysis failed with exception.",
-                error=err,
+                run=run,
+                ws_ctx=ws_ctx,
+                req_result=req_result,
+                a1_rec=a1_rec,
+                original_snapshot_sha=snapshot_sha,
+                original_diff_sha=diff_sha,
             )
-            return self._fail_run(run_id, WorkflowState.ANALYZING_CODEBASE, err)
-
-        m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
-        if cb_result.status == "error":
-            err = cb_result.error or AgentError(
-                code="M01_ANALYSIS_ERROR",
-                message="M01 codebase analysis returned an error status.",
-            )
-            m01_rec = AgentExecutionRecord(
-                agent_name="CodebaseAdapter",
-                stage=WorkflowState.ANALYZING_CODEBASE.value,
-                status=AgentExecutionStatus.FAILED,
-                started_at=m01_started,
-                completed_at=utc_now(),
-                duration_ms=m01_dur_ms,
-                execution_mode=run.execution_mode.value,
-                output_summary=err.message,
-                error=err,
-            )
-            self._log(
-                run_id=run_id,
-                agent_name="CodebaseAdapter",
-                stage=WorkflowState.ANALYZING_CODEBASE,
-                status=AgentExecutionStatus.FAILED,
-                duration_ms=m01_dur_ms,
-                input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
-                output_summary=err.message,
-                error=err,
-            )
-            return self._fail_run(
+            if cb_result is None or run.state != WorkflowState.GENERATING_TESTS:
+                return run
+        else:
+            run = self.transition_state(
                 run_id,
+                WorkflowState.ANALYZING_REQUIREMENTS,
                 WorkflowState.ANALYZING_CODEBASE,
-                err,
                 updater=lambda current: current.model_copy(
                     update={
-                        "codebase_analysis": cb_result,
-                        "agent_records": [*current.agent_records, m01_rec],
+                        "requirement_analysis": req_result,
+                        "agent_records": [*current.agent_records, a1_rec],
                     }
+                ),
+                reason=(
+                    f"A1 requirement analysis completed ({req_result.status}); "
+                    "starting M01 codebase analysis."
                 ),
             )
 
-        if cb_result.status == "no_changes" or not cb_result.has_relevant_changes:
+            # ---- Stage 2 (verify_existing_change): M01 Codebase Analysis ----
+            m01_started = utc_now()
+            m01_t0 = time.perf_counter()
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_CODEBASE,
+                status=AgentExecutionStatus.SUCCEEDED,
+                input_summary=(
+                    f"Analyzing workspace source_path={ws_ctx.source_path} "
+                    f"against effective_base_ref={ws_ctx.effective_base_ref}"
+                ),
+                output_summary="Invoked M01 CodebaseAdapter.analyze.",
+            )
+            try:
+                cb_result = self.codebase_adapter.analyze(
+                    ws_ctx.workspace_repo_path,
+                    source_path=ws_ctx.source_path,
+                    base_ref=ws_ctx.effective_base_ref,
+                )
+            except Exception as exc:  # noqa: BLE001
+                m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
+                err = AgentError(
+                    code="M01_UNEXPECTED_ERROR",
+                    message=f"CodebaseAdapter raised an unexpected exception: {exc}",
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_CODEBASE,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=m01_dur_ms,
+                    output_summary="M01 codebase analysis failed with exception.",
+                    error=err,
+                )
+                return self._fail_run(run_id, WorkflowState.ANALYZING_CODEBASE, err)
+
+            m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
+            if cb_result.status == "error":
+                err = cb_result.error or AgentError(
+                    code="M01_ANALYSIS_ERROR",
+                    message="M01 codebase analysis returned an error status.",
+                )
+                m01_rec = AgentExecutionRecord(
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_CODEBASE.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=m01_started,
+                    completed_at=utc_now(),
+                    duration_ms=m01_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=err.message,
+                    error=err,
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_CODEBASE,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=m01_dur_ms,
+                    input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
+                    output_summary=err.message,
+                    error=err,
+                )
+                return self._fail_run(
+                    run_id,
+                    WorkflowState.ANALYZING_CODEBASE,
+                    err,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "codebase_analysis": cb_result,
+                            "agent_records": [*current.agent_records, m01_rec],
+                        }
+                    ),
+                )
+
+            if cb_result.status == "no_changes" or not cb_result.has_relevant_changes:
+                m01_rec = AgentExecutionRecord(
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_CODEBASE.value,
+                    status=AgentExecutionStatus.COMPLETED_NO_CHANGES,
+                    started_at=m01_started,
+                    completed_at=utc_now(),
+                    duration_ms=m01_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=(
+                        "No tracked Python changes detected under source_path relative to base_ref; "
+                        "M03 test generation and M04 verification were skipped."
+                    ),
+                    assumptions=list(cb_result.assumptions),
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="CodebaseAdapter",
+                    stage=WorkflowState.ANALYZING_CODEBASE,
+                    status=AgentExecutionStatus.COMPLETED_NO_CHANGES,
+                    duration_ms=m01_dur_ms,
+                    input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
+                    output_summary=(
+                        "Zero tracked Python changes detected. Workflow stopped without "
+                        "invoking M03 or M04; this is not proof of verification."
+                    ),
+                )
+                return self.transition_state(
+                    run_id,
+                    WorkflowState.ANALYZING_CODEBASE,
+                    WorkflowState.COMPLETED_NO_CHANGES,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "codebase_analysis": cb_result,
+                            "agent_records": [*current.agent_records, m01_rec],
+                        }
+                    ),
+                    reason=(
+                        "No relevant tracked Python changes detected relative to base_ref. "
+                        "Skipped M03 test generation and M04 verification (not classified as passing verification)."
+                    ),
+                )
+
+            # M01 succeeded with changes
+            m01_summary = (
+                f"Detected {len(cb_result.changed_files_repo_relative)} changed file(s) "
+                f"and {len(cb_result.impacted_modules_repo_relative)} impacted module(s)."
+            )
             m01_rec = AgentExecutionRecord(
                 agent_name="CodebaseAdapter",
                 stage=WorkflowState.ANALYZING_CODEBASE.value,
-                status=AgentExecutionStatus.COMPLETED_NO_CHANGES,
+                status=AgentExecutionStatus.SUCCEEDED,
                 started_at=m01_started,
                 completed_at=utc_now(),
                 duration_ms=m01_dur_ms,
                 execution_mode=run.execution_mode.value,
-                output_summary=(
-                    "No tracked Python changes detected under source_path relative to base_ref; "
-                    "M03 test generation and M04 verification were skipped."
-                ),
+                output_summary=m01_summary,
                 assumptions=list(cb_result.assumptions),
             )
             self._log(
                 run_id=run_id,
                 agent_name="CodebaseAdapter",
                 stage=WorkflowState.ANALYZING_CODEBASE,
-                status=AgentExecutionStatus.COMPLETED_NO_CHANGES,
+                status=AgentExecutionStatus.SUCCEEDED,
                 duration_ms=m01_dur_ms,
                 input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
-                output_summary=(
-                    "Zero tracked Python changes detected. Workflow stopped without "
-                    "invoking M03 or M04; this is not proof of verification."
-                ),
+                output_summary=m01_summary,
             )
-            return self.transition_state(
+
+            run = self.transition_state(
                 run_id,
                 WorkflowState.ANALYZING_CODEBASE,
-                WorkflowState.COMPLETED_NO_CHANGES,
+                WorkflowState.GENERATING_TESTS,
                 updater=lambda current: current.model_copy(
                     update={
                         "codebase_analysis": cb_result,
                         "agent_records": [*current.agent_records, m01_rec],
                     }
                 ),
-                reason=(
-                    "No relevant tracked Python changes detected relative to base_ref. "
-                    "Skipped M03 test generation and M04 verification (not classified as passing verification)."
-                ),
+                reason="M01 analysis completed with tracked changes; starting M03 test generation.",
             )
-
-        # M01 succeeded with changes
-        m01_summary = (
-            f"Detected {len(cb_result.changed_files_repo_relative)} changed file(s) "
-            f"and {len(cb_result.impacted_modules_repo_relative)} impacted module(s)."
-        )
-        m01_rec = AgentExecutionRecord(
-            agent_name="CodebaseAdapter",
-            stage=WorkflowState.ANALYZING_CODEBASE.value,
-            status=AgentExecutionStatus.SUCCEEDED,
-            started_at=m01_started,
-            completed_at=utc_now(),
-            duration_ms=m01_dur_ms,
-            execution_mode=run.execution_mode.value,
-            output_summary=m01_summary,
-            assumptions=list(cb_result.assumptions),
-        )
-        self._log(
-            run_id=run_id,
-            agent_name="CodebaseAdapter",
-            stage=WorkflowState.ANALYZING_CODEBASE,
-            status=AgentExecutionStatus.SUCCEEDED,
-            duration_ms=m01_dur_ms,
-            input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
-            output_summary=m01_summary,
-        )
-
-        run = self.transition_state(
-            run_id,
-            WorkflowState.ANALYZING_CODEBASE,
-            WorkflowState.GENERATING_TESTS,
-            updater=lambda current: current.model_copy(
-                update={
-                    "codebase_analysis": cb_result,
-                    "agent_records": [*current.agent_records, m01_rec],
-                }
-            ),
-            reason="M01 analysis completed with tracked changes; starting M03 test generation.",
-        )
 
         # ---- Stage 2: M03 Test Generation ----
         m03_started = utc_now()
@@ -1404,6 +1469,816 @@ class OrchestratorService:
             ),
             reason="Test proposals generated; paused at Human Review Gate 1 (no tests executed).",
         )
+
+    def _execute_patch_generation_pipeline(
+        self,
+        *,
+        run_id: str,
+        run: WorkflowRunRecord,
+        ws_ctx: Any,
+        req_result: RequirementAnalysisResult,
+        a1_rec: AgentExecutionRecord,
+        original_snapshot_sha: str,
+        original_diff_sha: str,
+    ) -> tuple[WorkflowRunRecord, CodebaseAnalysisResult | None]:
+        """Execute stages 3..9 of ``generate_and_verify_change`` inside the isolated workspace.
+
+        Transitions:
+        ANALYZING_REQUIREMENTS
+          -> COLLECTING_PRE_CHANGE_CONTEXT
+          -> GENERATING_PATCH
+          -> VALIDATING_PATCH
+          -> APPLYING_PATCH
+          -> ANALYZING_POST_PATCH_IMPACT
+          -> GENERATING_TESTS
+        (or FAILED on any unavailable context/provider, blocking ambiguity,
+        validation violation, or patch application failure).
+        """
+        run = self.transition_state(
+            run_id,
+            WorkflowState.ANALYZING_REQUIREMENTS,
+            WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+            updater=lambda current: current.model_copy(
+                update={
+                    "requirement_analysis": req_result,
+                    "agent_records": [*current.agent_records, a1_rec],
+                }
+            ),
+            reason=(
+                f"A1 requirement analysis completed ({req_result.status}); "
+                "collecting available pre-change repository context."
+            ),
+        )
+
+        # ---- Stage 3: Pre-change static codebase context ----
+        pre_started = utc_now()
+        pre_t0 = time.perf_counter()
+        target_modules: list[str] = []
+        for ac in req_result.acceptance_criteria:
+            for mod in ac.target_modules:
+                if mod not in target_modules:
+                    target_modules.append(mod)
+
+        self._log(
+            run_id=run_id,
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"Collecting static pre-change context for source_path={ws_ctx.source_path}, "
+                f"base_ref={ws_ctx.effective_base_ref}, target_modules={target_modules}"
+            ),
+            output_summary="Invoked CodebaseAdapter.collect_pre_change_context.",
+        )
+        try:
+            pre_ctx, relevant_source_files = (
+                self.codebase_adapter.collect_pre_change_context(
+                    ws_ctx.workspace_repo_path,
+                    source_path=ws_ctx.source_path,
+                    base_ref=ws_ctx.effective_base_ref,
+                    target_modules=target_modules,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            pre_dur_ms = int((time.perf_counter() - pre_t0) * 1000)
+            err = AgentError(
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=f"Unexpected error collecting pre-change codebase context: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=pre_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return (
+                self._fail_run(run_id, WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT, err),
+                None,
+            )
+
+        pre_dur_ms = int((time.perf_counter() - pre_t0) * 1000)
+        if pre_ctx.status != "completed" or not relevant_source_files:
+            err = pre_ctx.error or AgentError(
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=(
+                    "Required pre-change codebase context is unavailable for "
+                    f"source_path='{ws_ctx.source_path}'."
+                ),
+            )
+            pre_rec = AgentExecutionRecord(
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=pre_started,
+                completed_at=utc_now(),
+                duration_ms=pre_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=pre_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "pre_change_context": pre_ctx,
+                        "agent_records": [*current.agent_records, pre_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        pre_summary = (
+            f"Indexed {pre_ctx.total_indexed_files} Python file(s) "
+            f"(scope={pre_ctx.scope}, pre_change_impact_prediction_available=False, "
+            f"relevant_files={len(relevant_source_files)})."
+        )
+        pre_rec = AgentExecutionRecord(
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=pre_started,
+            completed_at=utc_now(),
+            duration_ms=pre_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=pre_summary,
+            assumptions=list(pre_ctx.limitation_notes),
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=pre_dur_ms,
+            input_summary=f"source_path={ws_ctx.source_path}",
+            output_summary=pre_summary,
+        )
+
+        # ---- Stage 4: Check mandatory unresolved ambiguities BEFORE invoking A4 ----
+        blocking_ambiguity_ids = [
+            amb.ambiguity_id
+            for amb in req_result.ambiguities
+            if (amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING)
+            and not amb.resolved
+        ]
+        if req_result.has_mandatory_unresolved_ambiguities or blocking_ambiguity_ids:
+            err = AgentError(
+                code="UNRESOLVED_REQUIREMENT_AMBIGUITY",
+                message=(
+                    "Cannot automatically generate or apply a patch while mandatory "
+                    "business requirement ambiguities remain unresolved "
+                    f"({', '.join(blocking_ambiguity_ids) or 'unspecified'})."
+                ),
+                details={
+                    "unresolved_ambiguity_ids": blocking_ambiguity_ids,
+                    "blocked_stage": WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT.value,
+                },
+                retryable=False,
+            )
+            blocked_patch_result = PatchGenerationResult(
+                status="blocked",
+                attempt_number=1,
+                proposal=None,
+                model_metadata=PatchModelMetadata(
+                    provider=None,
+                    model_label="blocked_ambiguity",
+                    generation_mode=run.execution_mode.value,
+                    is_deterministic_fixture=False,
+                    is_mock_output=False,
+                ),
+                is_deterministic_fixture=False,
+                is_mock_output=False,
+                error=err,
+                notes=[
+                    "A4 PatchGenerationAdapter was not invoked because mandatory requirement ambiguities remain unresolved.",
+                ],
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="OrchestratorService",
+                stage=WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+                status=AgentExecutionStatus.FAILED,
+                input_summary=f"blocking_ambiguities={blocking_ambiguity_ids}",
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "pre_change_context": pre_ctx,
+                        "patch_generation": blocked_patch_result,
+                        "patch_attempt_number": 1,
+                        "agent_records": [*current.agent_records, pre_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        allowed_mod_paths = (
+            [ws_ctx.source_path]
+            if ws_ctx.source_path not in {"", "."}
+            else list(pre_ctx.indexed_file_paths)
+        )
+        attempt_number = 1
+        patch_request = PatchGenerationRequest(
+            run_id=run_id,
+            original_requirement=run.requirements,
+            acceptance_criteria=list(req_result.acceptance_criteria),
+            business_constraints=list(req_result.business_constraints),
+            unresolved_ambiguities=[
+                amb for amb in req_result.ambiguities if not amb.resolved
+            ],
+            repository_snapshot_ref=ws_ctx.resolved_base_commit,
+            base_ref=ws_ctx.base_ref,
+            resolved_base_commit=ws_ctx.resolved_base_commit,
+            source_snapshot_sha256=original_snapshot_sha,
+            source_path=ws_ctx.source_path,
+            codebase_context=pre_ctx,
+            allowed_modification_paths=allowed_mod_paths,
+            relevant_source_files=relevant_source_files,
+            relevant_source_file_paths=sorted(relevant_source_files.keys()),
+            attempt_number=attempt_number,
+            execution_mode=run.execution_mode.value,
+            previous_verification_evidence=None,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.COLLECTING_PRE_CHANGE_CONTEXT,
+            WorkflowState.GENERATING_PATCH,
+            updater=lambda current: current.model_copy(
+                update={
+                    "pre_change_context": pre_ctx,
+                    "patch_generation_request": patch_request,
+                    "patch_attempt_number": attempt_number,
+                    "agent_records": [*current.agent_records, pre_rec],
+                }
+            ),
+            reason=(
+                "Pre-change repository context collected and no blocking ambiguities "
+                "detected; invoking A4 patch generation adapter."
+            ),
+        )
+
+        # ---- Stage 5: Invoke injectable A4 PatchGenerationAdapter ----
+        a4_started = utc_now()
+        a4_t0 = time.perf_counter()
+        self._log(
+            run_id=run_id,
+            agent_name="PatchGenerationAdapter",
+            stage=WorkflowState.GENERATING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"attempt={attempt_number}, mode={run.execution_mode.value}, "
+                f"criteria={len(patch_request.acceptance_criteria)}, "
+                f"relevant_files={len(patch_request.relevant_source_file_paths)}"
+            ),
+            output_summary="Invoked A4 PatchGenerationAdapter.generate.",
+        )
+        try:
+            patch_result = self.patch_adapter.generate(patch_request)
+        except Exception as exc:  # noqa: BLE001
+            a4_dur_ms = int((time.perf_counter() - a4_t0) * 1000)
+            err = AgentError(
+                code="A4_UNEXPECTED_ERROR",
+                message=f"PatchGenerationAdapter raised an unexpected exception: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.GENERATING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=a4_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(run_id, WorkflowState.GENERATING_PATCH, err), None
+
+        a4_dur_ms = int((time.perf_counter() - a4_t0) * 1000)
+        if patch_result.status != "proposed" or patch_result.proposal is None:
+            err = patch_result.error or AgentError(
+                code="PATCH_GENERATION_FAILED",
+                message=(
+                    "A4 patch generation did not produce a valid patch proposal "
+                    f"(status='{patch_result.status}')."
+                ),
+            )
+            a4_rec = AgentExecutionRecord(
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.GENERATING_PATCH.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=a4_started,
+                completed_at=utc_now(),
+                duration_ms=a4_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchGenerationAdapter",
+                stage=WorkflowState.GENERATING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=a4_dur_ms,
+                input_summary=f"attempt={attempt_number}, mode={run.execution_mode.value}",
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.GENERATING_PATCH,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "patch_generation": patch_result,
+                        "patch_attempt_number": patch_result.attempt_number,
+                        "agent_records": [*current.agent_records, a4_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        proposal = patch_result.proposal
+        patch_source = (
+            "deterministic_offline_fixture"
+            if patch_result.is_deterministic_fixture
+            else (
+                "mock_output" if patch_result.is_mock_output else "injected_provider"
+            )
+        )
+        a4_summary = (
+            f"Generated patch proposal '{proposal.proposal_id}' "
+            f"(sha256={proposal.patch_sha256[:12]}, files={len(proposal.affected_files)}, "
+            f"attempt={patch_result.attempt_number}, model={patch_result.model_metadata.model_label}, "
+            f"source={patch_source})."
+        )
+        a4_rec = AgentExecutionRecord(
+            agent_name="PatchGenerationAdapter",
+            stage=WorkflowState.GENERATING_PATCH.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=a4_started,
+            completed_at=utc_now(),
+            duration_ms=a4_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=a4_summary,
+            assumptions=list(proposal.assumptions),
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="PatchGenerationAdapter",
+            stage=WorkflowState.GENERATING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=a4_dur_ms,
+            input_summary=f"attempt={patch_result.attempt_number}, mode={run.execution_mode.value}",
+            output_summary=a4_summary,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.GENERATING_PATCH,
+            WorkflowState.VALIDATING_PATCH,
+            updater=lambda current: current.model_copy(
+                update={
+                    "patch_generation": patch_result,
+                    "patch_proposal_sha256": proposal.patch_sha256,
+                    "patch_attempt_number": patch_result.attempt_number,
+                    "agent_records": [*current.agent_records, a4_rec],
+                }
+            ),
+            reason="Patch proposal received from A4; running controlled patch safety validation.",
+        )
+
+        # ---- Stage 6: Controlled Patch Validation ----
+        val_started = utc_now()
+        val_t0 = time.perf_counter()
+        valid_cids = {ac.criterion_id for ac in req_result.acceptance_criteria}
+        self._log(
+            run_id=run_id,
+            agent_name="PatchValidator",
+            stage=WorkflowState.VALIDATING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"Validating proposal '{proposal.proposal_id}' "
+                f"(sha256={proposal.patch_sha256[:12]}, files={len(proposal.affected_files)})"
+            ),
+            output_summary="Invoked PatchValidator.validate.",
+        )
+        try:
+            validation_result = self.patch_validator.validate(
+                workspace_repo_path=ws_ctx.workspace_repo_path,
+                proposal=proposal,
+                source_path=ws_ctx.source_path,
+                base_ref=ws_ctx.effective_base_ref,
+                allowed_modification_paths=allowed_mod_paths,
+                expected_source_snapshot_sha256=original_snapshot_sha,
+                expected_git_diff_sha256=original_diff_sha,
+                valid_criterion_ids=valid_cids,
+            )
+        except Exception as exc:  # noqa: BLE001
+            val_dur_ms = int((time.perf_counter() - val_t0) * 1000)
+            err = AgentError(
+                code="PATCH_VALIDATION_ERROR",
+                message=f"PatchValidator raised an unexpected exception: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchValidator",
+                stage=WorkflowState.VALIDATING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=val_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(run_id, WorkflowState.VALIDATING_PATCH, err), None
+
+        val_dur_ms = int((time.perf_counter() - val_t0) * 1000)
+        if not validation_result.valid:
+            primary_err = (
+                validation_result.violations[0]
+                if validation_result.violations
+                else AgentError(
+                    code="PATCH_VALIDATION_FAILED",
+                    message="Proposed patch failed safety or applicability validation.",
+                )
+            )
+            val_rec = AgentExecutionRecord(
+                agent_name="PatchValidator",
+                stage=WorkflowState.VALIDATING_PATCH.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=val_started,
+                completed_at=utc_now(),
+                duration_ms=val_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=primary_err.message,
+                error=primary_err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchValidator",
+                stage=WorkflowState.VALIDATING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=val_dur_ms,
+                input_summary=f"patch_sha256={proposal.patch_sha256[:12]}",
+                output_summary=(
+                    f"Validation failed with {len(validation_result.violations)} violation(s): "
+                    f"{primary_err.code}: {primary_err.message}"
+                ),
+                error=primary_err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.VALIDATING_PATCH,
+                primary_err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "patch_validation": validation_result,
+                        "agent_records": [*current.agent_records, val_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        val_summary = (
+            f"Patch validation passed ({len(validation_result.checks_passed)} checks, "
+            f"files={validation_result.checked_files}, "
+            f"bytes={validation_result.patch_size_bytes}, git_apply_check=True)."
+        )
+        val_rec = AgentExecutionRecord(
+            agent_name="PatchValidator",
+            stage=WorkflowState.VALIDATING_PATCH.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=val_started,
+            completed_at=utc_now(),
+            duration_ms=val_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=val_summary,
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="PatchValidator",
+            stage=WorkflowState.VALIDATING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=val_dur_ms,
+            input_summary=f"patch_sha256={proposal.patch_sha256[:12]}",
+            output_summary=val_summary,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.VALIDATING_PATCH,
+            WorkflowState.APPLYING_PATCH,
+            updater=lambda current: current.model_copy(
+                update={
+                    "patch_validation": validation_result,
+                    "agent_records": [*current.agent_records, val_rec],
+                }
+            ),
+            reason="Patch passed safety and applicability checks; applying inside isolated workspace.",
+        )
+
+        # ---- Stage 7 & 8: Controlled Patch Application + Snapshot/Diff Recomputation ----
+        app_started = utc_now()
+        app_t0 = time.perf_counter()
+        self._log(
+            run_id=run_id,
+            agent_name="PatchApplicator",
+            stage=WorkflowState.APPLYING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=f"Applying validated patch sha256={proposal.patch_sha256[:12]}",
+            output_summary="Invoked PatchApplicator.apply.",
+        )
+        try:
+            app_result = self.patch_applicator.apply(
+                workspace_repo_path=ws_ctx.workspace_repo_path,
+                proposal=proposal,
+                validation_result=validation_result,
+                source_path=ws_ctx.source_path,
+                base_ref=ws_ctx.effective_base_ref,
+                expected_source_snapshot_sha256=original_snapshot_sha,
+                expected_git_diff_sha256=original_diff_sha,
+            )
+        except Exception as exc:  # noqa: BLE001
+            app_dur_ms = int((time.perf_counter() - app_t0) * 1000)
+            err = AgentError(
+                code="PATCH_APPLICATION_ERROR",
+                message=f"PatchApplicator raised an unexpected exception: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchApplicator",
+                stage=WorkflowState.APPLYING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=app_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(run_id, WorkflowState.APPLYING_PATCH, err), None
+
+        app_dur_ms = int((time.perf_counter() - app_t0) * 1000)
+        if (
+            not app_result.applied
+            or app_result.resulting_source_snapshot_sha256 is None
+            or app_result.resulting_git_diff_sha256 is None
+        ):
+            err = app_result.error or AgentError(
+                code="PATCH_APPLICATION_FAILED",
+                message="Patch application did not complete cleanly; aborted before verification.",
+            )
+            app_rec = AgentExecutionRecord(
+                agent_name="PatchApplicator",
+                stage=WorkflowState.APPLYING_PATCH.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=app_started,
+                completed_at=utc_now(),
+                duration_ms=app_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="PatchApplicator",
+                stage=WorkflowState.APPLYING_PATCH,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=app_dur_ms,
+                input_summary=f"patch_sha256={proposal.patch_sha256[:12]}",
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.APPLYING_PATCH,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "patch_application": app_result,
+                        "agent_records": [*current.agent_records, app_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        app_summary = (
+            f"Applied patch inside isolated workspace "
+            f"(files={app_result.applied_files}, "
+            f"orig_snap={original_snapshot_sha[:12]} -> "
+            f"new_snap={app_result.resulting_source_snapshot_sha256[:12]}, "
+            f"new_diff={app_result.resulting_git_diff_sha256[:12]})."
+        )
+        app_rec = AgentExecutionRecord(
+            agent_name="PatchApplicator",
+            stage=WorkflowState.APPLYING_PATCH.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=app_started,
+            completed_at=utc_now(),
+            duration_ms=app_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=app_summary,
+            assumptions=[app_result.isolation_note],
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="PatchApplicator",
+            stage=WorkflowState.APPLYING_PATCH,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=app_dur_ms,
+            input_summary=f"patch_sha256={proposal.patch_sha256[:12]}",
+            output_summary=app_summary,
+        )
+
+        # Persist post-patch snapshot/diff hashes while preserving original_* hashes
+        run = self.transition_state(
+            run_id,
+            WorkflowState.APPLYING_PATCH,
+            WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            updater=lambda current: current.model_copy(
+                update={
+                    "patch_application": app_result,
+                    "source_snapshot_sha256": app_result.resulting_source_snapshot_sha256,
+                    "git_diff_sha256": app_result.resulting_git_diff_sha256,
+                    "repository": current.repository.model_copy(
+                        update={"change_mode": "working_tree"}
+                    ),
+                    "agent_records": [*current.agent_records, app_rec],
+                }
+            ),
+            reason=(
+                "Patch applied inside isolated workspace and snapshot/diff evidence "
+                "recomputed; starting post-patch M01 impact analysis."
+            ),
+        )
+
+        # ---- Stage 9: Post-Patch M01 Impact Analysis ----
+        m01_started = utc_now()
+        m01_t0 = time.perf_counter()
+        self._log(
+            run_id=run_id,
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"Running post-patch M01 impact analysis for source_path={ws_ctx.source_path} "
+                f"against effective_base_ref={ws_ctx.effective_base_ref}"
+            ),
+            output_summary="Invoked M01 CodebaseAdapter.analyze (post-patch).",
+        )
+        try:
+            cb_result = self.codebase_adapter.analyze(
+                ws_ctx.workspace_repo_path,
+                source_path=ws_ctx.source_path,
+                base_ref=ws_ctx.effective_base_ref,
+            )
+        except Exception as exc:  # noqa: BLE001
+            m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
+            err = AgentError(
+                code="M01_POST_PATCH_UNEXPECTED_ERROR",
+                message=f"Post-patch CodebaseAdapter raised an unexpected exception: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=m01_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(run_id, WorkflowState.ANALYZING_POST_PATCH_IMPACT, err), None
+
+        m01_dur_ms = int((time.perf_counter() - m01_t0) * 1000)
+        if cb_result.status == "error":
+            err = cb_result.error or AgentError(
+                code="M01_POST_PATCH_ANALYSIS_ERROR",
+                message="Post-patch M01 codebase impact analysis returned an error.",
+            )
+            m01_rec = AgentExecutionRecord(
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=m01_started,
+                completed_at=utc_now(),
+                duration_ms=m01_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=m01_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "codebase_analysis": cb_result,
+                        "agent_records": [*current.agent_records, m01_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        if cb_result.status == "no_changes" or not cb_result.has_relevant_changes:
+            err = AgentError(
+                code="POST_PATCH_NO_CHANGES_DETECTED",
+                message=(
+                    "Post-patch M01 impact analysis detected zero tracked Python changes "
+                    "after patch application; refusing to silently complete."
+                ),
+            )
+            m01_rec = AgentExecutionRecord(
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=m01_started,
+                completed_at=utc_now(),
+                duration_ms=m01_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="CodebaseAdapter",
+                stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=m01_dur_ms,
+                output_summary=err.message,
+                error=err,
+            )
+            failed = self._fail_run(
+                run_id,
+                WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "codebase_analysis": cb_result,
+                        "agent_records": [*current.agent_records, m01_rec],
+                    }
+                ),
+            )
+            return failed, None
+
+        m01_summary = (
+            f"Post-patch M01 detected {len(cb_result.changed_files_repo_relative)} changed file(s) "
+            f"and {len(cb_result.impacted_modules_repo_relative)} impacted module(s)."
+        )
+        m01_rec = AgentExecutionRecord(
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=m01_started,
+            completed_at=utc_now(),
+            duration_ms=m01_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=m01_summary,
+            assumptions=list(cb_result.assumptions),
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="CodebaseAdapter",
+            stage=WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=m01_dur_ms,
+            input_summary=f"source_path={ws_ctx.source_path}, base_ref={ws_ctx.effective_base_ref}",
+            output_summary=m01_summary,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.ANALYZING_POST_PATCH_IMPACT,
+            WorkflowState.GENERATING_TESTS,
+            updater=lambda current: current.model_copy(
+                update={
+                    "codebase_analysis": cb_result,
+                    "agent_records": [*current.agent_records, m01_rec],
+                }
+            ),
+            reason="Post-patch M01 impact analysis completed; starting M03 test generation.",
+        )
+        return run, cb_result
 
     # ------------------------------------------------------------------
     # Integrity Verification Helpers (Phase 6 & 7)
@@ -2201,12 +3076,20 @@ class OrchestratorService:
             if mandatory_coverage_complete and criterion_mapping_status == "explicit"
             else "incomplete"
         )
+        patch_gen = run.patch_generation
         req_verification_proven = bool(
             mandatory_coverage_complete
             and verification.verification_passed
             and verification.baseline_comparison.status == "completed"
             and not req_analysis.is_deterministic_fixture
             and (gen is None or not gen.is_mock_output)
+            and (
+                patch_gen is None
+                or (
+                    not patch_gen.is_deterministic_fixture
+                    and not patch_gen.is_mock_output
+                )
+            )
         )
 
         unverified_reqs = []
@@ -2243,6 +3126,18 @@ class OrchestratorService:
             )
 
         traceability_dict = {
+            "workflow_mode": run.workflow_mode.value,
+            "patch_proposal_sha256": run.patch_proposal_sha256,
+            "patch_is_deterministic_fixture": (
+                run.patch_generation.is_deterministic_fixture
+                if run.patch_generation is not None
+                else None
+            ),
+            "patch_applied": (
+                run.patch_application.applied
+                if run.patch_application is not None
+                else None
+            ),
             "requirement_traceability_status": req_traceability_status,
             "structured_acceptance_criteria_status": "available",
             "criterion_mapping_status": criterion_mapping_status,
@@ -2357,9 +3252,29 @@ class OrchestratorService:
 
         limitations: list[str] = [
             "Baseline-versus-modified regression comparison was not executed; passing generated tests on the modified working copy alone does not guarantee complete regression safety.",
-            "Automated patch generation (A4), independent adversarial review (A6), and code coverage measurement are not executed in this M02 MVP.",
+            "Git workspace isolation copies files into a run-specific directory and is not an operating-system security sandbox.",
             "Reviewer identity labels are unauthenticated local MVP inputs and do not constitute cryptographic or SSO identity proof.",
         ]
+        if run.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
+            limitations.append(
+                "Pre-change M01 codebase context was limited to static AST indexing; full reverse-dependency impact analysis ran post-patch."
+            )
+            limitations.append(
+                "Independent adversarial review (A6), bounded automated repair loops, and code coverage measurement are not executed in this M02 MVP."
+            )
+            if run.patch_generation is not None and (
+                run.patch_generation.is_deterministic_fixture
+                or run.patch_generation.is_mock_output
+            ):
+                limitations.append(
+                    f"Applied patch was produced by an offline deterministic fixture "
+                    f"('{run.patch_generation.model_metadata.model_label}', "
+                    "is_deterministic_fixture=True), NOT actual AI-generated patch evidence."
+                )
+        else:
+            limitations.append(
+                "Automated patch generation (A4) was not executed in verify_existing_change mode; independent adversarial review (A6) and code coverage measurement are not executed in this M02 MVP."
+            )
         if req_analysis is None:
             limitations.append(
                 "Structured requirement decomposition (A1) was not executed for this run record."
@@ -2413,9 +3328,23 @@ class OrchestratorService:
             base_ref=run.repository.base_ref,
             resolved_base_commit=run.repository.resolved_base_commit,
             change_mode=run.repository.change_mode,
+            workflow_mode=run.workflow_mode.value,
             execution_mode=run.execution_mode.value,
             model_label=gen.model_label if gen else None,
             is_mock_output=gen.is_mock_output if gen else None,
+            patch_proposal_sha256=run.patch_proposal_sha256,
+            patch_is_deterministic_fixture=(
+                run.patch_generation.is_deterministic_fixture
+                if run.patch_generation is not None
+                else None
+            ),
+            patch_applied=(
+                run.patch_application.applied
+                if run.patch_application is not None
+                else None
+            ),
+            original_source_snapshot_sha256=run.original_source_snapshot_sha256,
+            resulting_source_snapshot_sha256=run.source_snapshot_sha256,
             changed_files=changed_files,
             impacted_modules=impacted_modules,
             approved_scenario_ids=approved_ids,
@@ -2474,6 +3403,16 @@ class OrchestratorService:
                     "Submit 'needs_review' or 'reject' instead.",
                     code="VERIFICATION_APPROVAL_BLOCKED",
                     details={"verification_outcome": outcome_val},
+                    run_id=run_id,
+                )
+            if (
+                run.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE
+                and (run.patch_application is None or not run.patch_application.applied)
+            ):
+                raise ReviewConflictError(
+                    "Cannot approve a generate_and_verify_change run without confirmed "
+                    "isolated-workspace patch application evidence.",
+                    code="PATCH_APPLICATION_REQUIRED",
                     run_id=run_id,
                 )
             if (

@@ -29,6 +29,13 @@ from .agents import (
     VerificationResult,
     utc_now,
 )
+from .patch import (
+    PatchApplicationResult,
+    PatchGenerationRequest,
+    PatchGenerationResult,
+    PatchValidationResult,
+    PreChangeCodebaseContext,
+)
 from .requirements import RequirementAnalysisResult
 
 SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -42,6 +49,11 @@ class WorkflowState(str, Enum):
     CREATED = "CREATED"
     ANALYZING_REQUIREMENTS = "ANALYZING_REQUIREMENTS"
     ANALYZING_CODEBASE = "ANALYZING_CODEBASE"
+    COLLECTING_PRE_CHANGE_CONTEXT = "COLLECTING_PRE_CHANGE_CONTEXT"
+    GENERATING_PATCH = "GENERATING_PATCH"
+    VALIDATING_PATCH = "VALIDATING_PATCH"
+    APPLYING_PATCH = "APPLYING_PATCH"
+    ANALYZING_POST_PATCH_IMPACT = "ANALYZING_POST_PATCH_IMPACT"
     GENERATING_TESTS = "GENERATING_TESTS"
     AWAITING_TEST_REVIEW = "AWAITING_TEST_REVIEW"
     RUNNING_VERIFICATION = "RUNNING_VERIFICATION"
@@ -52,6 +64,13 @@ class WorkflowState(str, Enum):
     REJECTED = "REJECTED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
+
+
+class WorkflowMode(str, Enum):
+    """Explicit workflow mode separating verification-only vs patch-generation runs."""
+
+    VERIFY_EXISTING_CHANGE = "verify_existing_change"
+    GENERATE_AND_VERIFY_CHANGE = "generate_and_verify_change"
 
 
 class ExecutionMode(str, Enum):
@@ -82,6 +101,7 @@ class CreateRunRequest(BaseModel):
     source_path: str = Field(default=".", min_length=1, max_length=500)
     base_ref: str = Field(default="HEAD", min_length=1, max_length=200)
     requirements: str = Field(..., min_length=1, max_length=10000)
+    workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST
 
     @field_validator("repository_path", "source_path", "base_ref", "requirements")
@@ -283,16 +303,30 @@ class WorkflowRunRecord(BaseModel):
     run_id: str = Field(..., min_length=1, max_length=120)
     state: WorkflowState = WorkflowState.CREATED
     requirements: str = Field(..., min_length=1, max_length=10000)
+    workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST
     repository: RepositoryInfo
     workspace_id: str | None = None
     workspace_path: str | None = None
+    original_source_snapshot_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    original_git_diff_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     git_diff_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     agent_records: list[AgentExecutionRecord] = Field(default_factory=list)
     requirement_analysis: RequirementAnalysisResult | None = None
+    pre_change_context: PreChangeCodebaseContext | None = None
+    patch_generation_request: PatchGenerationRequest | None = None
+    patch_generation: PatchGenerationResult | None = None
+    patch_proposal_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    patch_attempt_number: int | None = Field(default=None, ge=1, le=10)
+    patch_validation: PatchValidationResult | None = None
+    patch_application: PatchApplicationResult | None = None
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     test_review: TestReviewRecord | None = None

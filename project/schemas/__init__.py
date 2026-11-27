@@ -18,6 +18,18 @@ from .agents import (
     VerificationResult,
     utc_now,
 )
+from .patch import (
+    PatchApplicationResult,
+    PatchFileChange,
+    PatchGenerationRequest,
+    PatchGenerationResult,
+    PatchModelMetadata,
+    PatchProposal,
+    PatchValidationResult,
+    PreChangeCodebaseContext,
+    PreChangeFileSummary,
+    compute_patch_sha256,
+)
 from .requirements import (
     AcceptanceCriterion,
     AmbiguitySeverity,
@@ -41,6 +53,7 @@ from .workflow import (
     RepositoryInfo,
     TestReviewRecord,
     TestReviewRequest,
+    WorkflowMode,
     WorkflowRunRecord,
     WorkflowState,
 )
@@ -68,6 +81,15 @@ __all__ = [
     "HumanDecisionRecord",
     "HumanDecisionRequest",
     "ImpactedFile",
+    "PatchApplicationResult",
+    "PatchFileChange",
+    "PatchGenerationRequest",
+    "PatchGenerationResult",
+    "PatchModelMetadata",
+    "PatchProposal",
+    "PatchValidationResult",
+    "PreChangeCodebaseContext",
+    "PreChangeFileSummary",
     "RepositoryInfo",
     "RequirementAmbiguity",
     "RequirementAnalysisResult",
@@ -81,7 +103,9 @@ __all__ = [
     "VerificationOutcome",
     "VerificationResult",
     "VerificationStrategy",
+    "WorkflowMode",
     "WorkflowRunRecord",
     "WorkflowState",
+    "compute_patch_sha256",
     "utc_now",
 ]
