@@ -9,6 +9,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -936,11 +937,7 @@ def _to_verification_response(
         return None
 
     def redact_host_paths(text: str) -> str:
-        sanitized = redact_secrets(text)
-        for host_path in host_paths:
-            if host_path:
-                sanitized = sanitized.replace(host_path, "[host path redacted]")
-        return sanitized
+        return _redact_host_paths_str(text, host_paths)
 
     return VerificationResponse(
         execution_status=ver.execution_status,
@@ -953,9 +950,9 @@ def _to_verification_response(
         passed=ver.passed,
         failed=ver.failed,
         duration_seconds=ver.duration_seconds,
-        collection_errors=[redact_secrets(err) for err in ver.collection_errors],
+        collection_errors=[redact_host_paths(err) for err in ver.collection_errors],
         failures=[
-            fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+            fail.model_copy(update={"evidence": redact_host_paths(fail.evidence)})
             for fail in ver.failures
         ],
         risk_summary=ver.risk_summary,
@@ -973,12 +970,17 @@ def _to_verification_response(
     )
 
 
+_ABSOLUTE_POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?:[^\s\"'<>]*)")
+_ABSOLUTE_WINDOWS_PATH_RE = re.compile(r"(?<![\w])(?:[A-Za-z]:[\\/])(?:[^\s\"'<>]*)")
+
+
 def _redact_host_paths_str(text: str, host_paths: tuple[str | None, ...]) -> str:
     sanitized = redact_secrets(text)
     for host_path in host_paths:
         if host_path:
             sanitized = sanitized.replace(host_path, "[host path redacted]")
-    return sanitized
+    sanitized = _ABSOLUTE_POSIX_PATH_RE.sub("[host path redacted]", sanitized)
+    return _ABSOLUTE_WINDOWS_PATH_RE.sub("[host path redacted]", sanitized)
 
 
 def _to_independent_review_response(
