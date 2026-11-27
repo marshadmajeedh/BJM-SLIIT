@@ -27,6 +27,12 @@ from project.schemas.agents import (
     SuiteExecutionSummary,
     TestExecutionEvidence,
 )
+from project.schemas.patch import PatchApplicationResult, PatchGenerationResult, PatchValidationResult
+from project.schemas.repair import (
+    PatchAttemptRecord,
+    RepairAttemptHistory,
+    RepairEligibilityResult,
+)
 from project.schemas.workflow import AgentLogEntry, WorkflowRunRecord, WorkflowState
 
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -231,6 +237,120 @@ def _sanitize_baseline_comparison(
     )
 
 
+def _sanitize_patch_generation(
+    pg: PatchGenerationResult | None,
+) -> PatchGenerationResult | None:
+    if pg is None:
+        return None
+    sanitized_proposal = None
+    if pg.proposal is not None:
+        sanitized_proposal = pg.proposal.model_copy(
+            update={
+                "change_rationale": redact_secrets(pg.proposal.change_rationale),
+                "assumptions": [redact_secrets(a) for a in pg.proposal.assumptions],
+                "risk_indicators": [
+                    redact_secrets(r) for r in pg.proposal.risk_indicators
+                ],
+                "notes": [redact_secrets(n) for n in pg.proposal.notes],
+            }
+        )
+    return pg.model_copy(
+        update={
+            "proposal": sanitized_proposal,
+            "error": _sanitize_error(pg.error),
+            "notes": [redact_secrets(note) for note in pg.notes],
+        }
+    )
+
+
+def _sanitize_patch_validation(
+    pv: PatchValidationResult | None,
+) -> PatchValidationResult | None:
+    if pv is None:
+        return None
+    return pv.model_copy(
+        update={
+            "violations": [
+                sanitized
+                for v in pv.violations
+                if (sanitized := _sanitize_error(v)) is not None
+            ],
+        }
+    )
+
+
+def _sanitize_patch_application(
+    pa: PatchApplicationResult | None,
+) -> PatchApplicationResult | None:
+    if pa is None:
+        return None
+    return pa.model_copy(update={"error": _sanitize_error(pa.error)})
+
+
+def _sanitize_repair_eligibility(
+    elig: RepairEligibilityResult | None,
+) -> RepairEligibilityResult | None:
+    if elig is None:
+        return None
+    return elig.model_copy(
+        update={
+            "decision_reason": redact_secrets(elig.decision_reason),
+            "blocking_reasons": [redact_secrets(r) for r in elig.blocking_reasons],
+        }
+    )
+
+
+def _sanitize_patch_attempt(att: PatchAttemptRecord) -> PatchAttemptRecord:
+    return att.model_copy(
+        update={
+            "original_requirement": redact_secrets(att.original_requirement),
+            "patch_generation": _sanitize_patch_generation(att.patch_generation),
+            "patch_validation": _sanitize_patch_validation(att.patch_validation),
+            "patch_application": _sanitize_patch_application(att.patch_application),
+            "baseline_verification": _sanitize_baseline_verification(
+                att.baseline_verification
+            ),
+            "modified_verification": _sanitize_modified_verification(
+                att.modified_verification
+            ),
+            "failure_diagnostics": [
+                diag.model_copy(
+                    update={
+                        "evidence": redact_secrets(diag.evidence),
+                        "reason": redact_secrets(diag.reason),
+                        "recommendation": redact_secrets(diag.recommendation),
+                    }
+                )
+                for diag in att.failure_diagnostics
+            ],
+            "baseline_comparison": _sanitize_baseline_comparison(
+                att.baseline_comparison
+            ),
+            "repair_eligibility": _sanitize_repair_eligibility(att.repair_eligibility),
+            "errors": [
+                sanitized
+                for err in att.errors
+                if (sanitized := _sanitize_error(err)) is not None
+            ],
+            "notes": [redact_secrets(note) for note in att.notes],
+        }
+    )
+
+
+def _sanitize_repair_history(
+    hist: RepairAttemptHistory | None,
+) -> RepairAttemptHistory | None:
+    if hist is None:
+        return None
+    return hist.model_copy(
+        update={
+            "attempts": [_sanitize_patch_attempt(att) for att in hist.attempts],
+            "last_eligibility": _sanitize_repair_eligibility(hist.last_eligibility),
+            "termination_summary": redact_secrets(hist.termination_summary),
+        }
+    )
+
+
 def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
     """Redact secret patterns across top-level and nested run errors/summaries."""
     updates: dict[str, object] = {"error": _sanitize_error(run.error)}
@@ -275,11 +395,34 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             if req_obj.previous_verification_evidence is not None
             else None
         )
+        sanitized_bc_ev = (
+            redact_nested_secrets(req_obj.baseline_comparison_evidence)
+            if req_obj.baseline_comparison_evidence is not None
+            else None
+        )
         updates["patch_generation_request"] = req_obj.model_copy(
             update={
                 "original_requirement": redact_secrets(req_obj.original_requirement),
                 # Never persist raw source file contents into SQLite; retain file path list only.
                 "relevant_source_files": {},
+                "previous_proposed_patch": (
+                    redact_secrets(req_obj.previous_proposed_patch)
+                    if req_obj.previous_proposed_patch is not None
+                    else None
+                ),
+                "failure_diagnostics": [
+                    diag.model_copy(
+                        update={
+                            "evidence": redact_secrets(diag.evidence),
+                            "reason": redact_secrets(diag.reason),
+                            "recommendation": redact_secrets(diag.recommendation),
+                        }
+                    )
+                    for diag in req_obj.failure_diagnostics
+                ],
+                "baseline_comparison_evidence": (
+                    sanitized_bc_ev if isinstance(sanitized_bc_ev, dict) else None
+                ),
                 "previous_verification_evidence": (
                     sanitized_prev if isinstance(sanitized_prev, dict) else None
                 ),
@@ -287,42 +430,21 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
         )
 
     if run.patch_generation is not None:
-        pg = run.patch_generation
-        sanitized_proposal = None
-        if pg.proposal is not None:
-            sanitized_proposal = pg.proposal.model_copy(
-                update={
-                    "change_rationale": redact_secrets(pg.proposal.change_rationale),
-                    "assumptions": [redact_secrets(a) for a in pg.proposal.assumptions],
-                    "risk_indicators": [
-                        redact_secrets(r) for r in pg.proposal.risk_indicators
-                    ],
-                    "notes": [redact_secrets(n) for n in pg.proposal.notes],
-                }
-            )
-        updates["patch_generation"] = pg.model_copy(
-            update={
-                "proposal": sanitized_proposal,
-                "error": _sanitize_error(pg.error),
-                "notes": [redact_secrets(note) for note in pg.notes],
-            }
-        )
+        updates["patch_generation"] = _sanitize_patch_generation(run.patch_generation)
 
     if run.patch_validation is not None:
-        updates["patch_validation"] = run.patch_validation.model_copy(
-            update={
-                "violations": [
-                    sanitized
-                    for v in run.patch_validation.violations
-                    if (sanitized := _sanitize_error(v)) is not None
-                ],
-            }
-        )
+        updates["patch_validation"] = _sanitize_patch_validation(run.patch_validation)
 
     if run.patch_application is not None:
-        updates["patch_application"] = run.patch_application.model_copy(
-            update={"error": _sanitize_error(run.patch_application.error)}
+        updates["patch_application"] = _sanitize_patch_application(run.patch_application)
+
+    if run.repair_eligibility is not None:
+        updates["repair_eligibility"] = _sanitize_repair_eligibility(
+            run.repair_eligibility
         )
+
+    if run.repair_history is not None:
+        updates["repair_history"] = _sanitize_repair_history(run.repair_history)
 
     if run.codebase_analysis is not None and run.codebase_analysis.error is not None:
         updates["codebase_analysis"] = run.codebase_analysis.model_copy(
@@ -358,6 +480,14 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
         if run.report.baseline_comparison is not None:
             rep_updates["baseline_comparison"] = _sanitize_baseline_comparison(
                 run.report.baseline_comparison
+            )
+        if run.report.repair_eligibility is not None:
+            rep_updates["repair_eligibility"] = _sanitize_repair_eligibility(
+                run.report.repair_eligibility
+            )
+        if run.report.repair_history is not None:
+            rep_updates["repair_history"] = _sanitize_repair_history(
+                run.report.repair_history
             )
         if run.report.evidence_limitations:
             rep_updates["evidence_limitations"] = [

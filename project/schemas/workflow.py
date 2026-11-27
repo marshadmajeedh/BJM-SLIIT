@@ -1,8 +1,9 @@
 """Shared workflow, request, decision, and log schemas for ChangeGuard AI (M02).
 
 Design assumptions:
-- No active patch-repair workflow state is included until patch generation (M03/A4)
-  is implemented.
+- Bounded automated patch repair states (``EVALUATING_REPAIR_ELIGIBILITY``,
+  ``REPAIRING_PATCH``) apply strictly to ``generate_and_verify_change`` runs
+  within the configured repair budget (max 2 repair attempts / 3 total proposals).
 - Test review references stable scenario identifiers rather than raw filesystem
   paths supplied by API clients.
 - Execution defaults to safe offline mode (``offline_test``); live LLM requests
@@ -39,6 +40,12 @@ from .patch import (
     PatchValidationResult,
     PreChangeCodebaseContext,
 )
+from .repair import (
+    RepairAttemptHistory,
+    RepairEligibilityResult,
+    RepairPolicy,
+    RepairTerminationReason,
+)
 from .requirements import RequirementAnalysisResult
 
 SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -63,6 +70,8 @@ class WorkflowState(str, Enum):
     RUNNING_BASELINE_VERIFICATION = "RUNNING_BASELINE_VERIFICATION"
     RUNNING_MODIFIED_VERIFICATION = "RUNNING_MODIFIED_VERIFICATION"
     COMPARING_VERIFICATION_RESULTS = "COMPARING_VERIFICATION_RESULTS"
+    EVALUATING_REPAIR_ELIGIBILITY = "EVALUATING_REPAIR_ELIGIBILITY"
+    REPAIRING_PATCH = "REPAIRING_PATCH"
     RUNNING_VERIFICATION = "RUNNING_VERIFICATION"
     COMPILING_REPORT = "COMPILING_REPORT"
     AWAITING_FINAL_APPROVAL = "AWAITING_FINAL_APPROVAL"
@@ -110,6 +119,8 @@ class CreateRunRequest(BaseModel):
     requirements: str = Field(..., min_length=1, max_length=10000)
     workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST
+    repair_enabled: bool | None = None
+    max_repair_attempts: int | None = Field(default=None, ge=0, le=2)
 
     @field_validator("repository_path", "source_path", "base_ref", "requirements")
     @classmethod
@@ -339,6 +350,11 @@ class WorkflowRunRecord(BaseModel):
     patch_attempt_number: int | None = Field(default=None, ge=1, le=10)
     patch_validation: PatchValidationResult | None = None
     patch_application: PatchApplicationResult | None = None
+    repair_policy: RepairPolicy | None = None
+    repair_attempts_consumed: int = Field(default=0, ge=0, le=2)
+    repair_eligibility: RepairEligibilityResult | None = None
+    repair_termination_reason: RepairTerminationReason | None = None
+    repair_history: RepairAttemptHistory | None = None
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     test_review: TestReviewRecord | None = None

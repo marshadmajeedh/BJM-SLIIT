@@ -19,6 +19,7 @@ from project.marsadh_orchestrator.store import (
     _sanitize_baseline_comparison,
     _sanitize_baseline_verification,
     _sanitize_modified_verification,
+    _sanitize_repair_eligibility,
     redact_nested_secrets,
     redact_secrets,
 )
@@ -39,12 +40,19 @@ from project.schemas import (
     HumanDecisionRecord,
     ModifiedVerificationResult,
     PatchApplicationResult,
+    PatchAttemptOutcome,
+    PatchAttemptRecord,
+    PatchAttemptType,
     PatchFileChange,
     PatchGenerationResult,
     PatchModelMetadata,
     PatchValidationResult,
     PreChangeCodebaseContext,
     PreChangeFileSummary,
+    RepairAttemptHistory,
+    RepairEligibilityResult,
+    RepairPolicy,
+    RepairTerminationReason,
     RequirementAmbiguity,
     RequirementAnalysisResult,
     RequirementAssumption,
@@ -85,6 +93,8 @@ class HealthResponse(BaseModel):
     live_llm_configured: bool
     groq_model: str | None = None
     patch_generator_configured: bool = False
+    auto_repair_enabled: bool = True
+    max_repair_attempts: int = 2
     supported_workflow_modes: list[str] = Field(
         default_factory=lambda: [
             WorkflowMode.VERIFY_EXISTING_CHANGE.value,
@@ -235,6 +245,69 @@ class PatchApplicationResponse(BaseModel):
     isolation_note: str
 
 
+class PatchAttemptResponse(BaseModel):
+    """Sanitized single patch attempt record without host paths or unredacted secrets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_number: int
+    attempt_type: PatchAttemptType
+    repair_attempt_index: int = 0
+    original_requirement: str
+    acceptance_criterion_ids: list[str] = Field(default_factory=list)
+    previous_proposal_id: str | None = None
+    previous_patch_sha256: str | None = None
+    base_snapshot_sha256: str | None = None
+    resulting_source_snapshot_sha256: str | None = None
+    resulting_git_diff_sha256: str | None = None
+    patch_generation: PatchGenerationResponse | None = None
+    patch_proposal_id: str | None = None
+    patch_sha256: str | None = None
+    patch_validation: PatchValidationResponse | None = None
+    patch_application: PatchApplicationResponse | None = None
+    approved_test_ids: list[str] = Field(default_factory=list)
+    approved_test_hashes: dict[str, str] = Field(default_factory=dict)
+    baseline_reused: bool = False
+    baseline_verification: BaselineVerificationResult | None = None
+    modified_verification: ModifiedVerificationResult | None = None
+    failure_diagnostics: list[FailureDiagnostic] = Field(default_factory=list)
+    failure_signature: str | None = None
+    baseline_comparison: BaselineComparisonEvidence | None = None
+    repair_eligibility: RepairEligibilityResult | None = None
+    provider_invoked: bool = False
+    consumed_repair_budget: bool = False
+    is_deterministic_fixture: bool = False
+    is_mock_output: bool = False
+    model_label: str | None = None
+    durations_ms: dict[str, int] = Field(default_factory=dict)
+    started_at: datetime
+    completed_at: datetime | None = None
+    outcome: PatchAttemptOutcome
+    errors: list[AgentError] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RepairAttemptHistoryResponse(BaseModel):
+    """Sanitized bounded automated patch repair history and budget status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy: RepairPolicy
+    total_proposals_attempted: int = 0
+    repair_attempts_consumed: int = 0
+    current_attempt_number: int = 0
+    remaining_repair_budget: int = 0
+    attempts: list[PatchAttemptResponse] = Field(default_factory=list)
+    seen_patch_hashes: list[str] = Field(default_factory=list)
+    seen_failure_signatures: list[str] = Field(default_factory=list)
+    last_eligibility: RepairEligibilityResult | None = None
+    termination_reason: RepairTerminationReason | None = None
+    termination_summary: str = ""
+    final_candidate_attempt_number: int | None = None
+    final_candidate_proposal_id: str | None = None
+    final_candidate_patch_sha256: str | None = None
+
+
 class CodebaseAnalysisResponse(BaseModel):
     """Normalized M01 codebase analysis view excluding raw payloads and host paths."""
 
@@ -327,6 +400,17 @@ class ChangePackageResponse(BaseModel):
     patch_proposal_sha256: str | None = None
     patch_is_deterministic_fixture: bool | None = None
     patch_applied: bool | None = None
+    repair_enabled: bool | None = None
+    max_repair_attempts: int | None = None
+    repair_attempts_consumed: int = 0
+    current_attempt_number: int | None = None
+    remaining_repair_budget: int | None = None
+    repair_eligibility: RepairEligibilityResult | None = None
+    repair_termination_reason: RepairTerminationReason | None = None
+    repair_history: RepairAttemptHistoryResponse | None = None
+    final_candidate_proposal_id: str | None = None
+    final_candidate_patch_sha256: str | None = None
+    final_verification_outcome: VerificationOutcome | None = None
     original_source_snapshot_sha256: str | None = None
     baseline_source_snapshot_sha256: str | None = None
     resulting_source_snapshot_sha256: str | None = None
@@ -374,6 +458,9 @@ class RunSummaryResponse(BaseModel):
     has_unresolved_ambiguities: bool = False
     patch_applied: bool | None = None
     patch_attempt_number: int | None = None
+    repair_enabled: bool | None = None
+    repair_attempts_consumed: int = 0
+    repair_termination_reason: RepairTerminationReason | None = None
     changed_file_count: int = 0
     proposed_scenario_count: int = 0
     verification_outcome: VerificationOutcome | None = None
@@ -413,6 +500,17 @@ class RunDetailResponse(BaseModel):
     git_diff_sha256: str | None = None
     patch_proposal_sha256: str | None = None
     patch_attempt_number: int | None = None
+    repair_enabled: bool | None = None
+    max_repair_attempts: int | None = None
+    repair_attempts_consumed: int = 0
+    remaining_repair_budget: int | None = None
+    repair_policy: RepairPolicy | None = None
+    repair_eligibility: RepairEligibilityResult | None = None
+    repair_termination_reason: RepairTerminationReason | None = None
+    repair_history: RepairAttemptHistoryResponse | None = None
+    final_candidate_proposal_id: str | None = None
+    final_candidate_patch_sha256: str | None = None
+    final_verification_outcome: VerificationOutcome | None = None
     created_at: datetime
     updated_at: datetime
     allowed_actions: list[str] = Field(default_factory=list)
@@ -476,11 +574,16 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
             active_comparison is not None
             and active_comparison.summary.blocks_ordinary_approval
         )
+        repair_blocked = run.repair_termination_reason in {
+            RepairTerminationReason.TEST_ASSUMPTIONS_INVALIDATED,
+            RepairTerminationReason.TEST_MODIFICATION_REJECTED,
+        }
         if (
             run.verification is not None
             and run.verification.verification_passed
             and not has_blocking_ambiguity
             and not has_confirmed_regression
+            and not repair_blocked
             and patch_ready
         ):
             return [
@@ -586,6 +689,82 @@ def _to_patch_application_response(
         error=_sanitize_error(pa.error),
         applied_at=pa.applied_at,
         isolation_note=pa.isolation_note,
+    )
+
+
+def _to_patch_attempt_response(att: PatchAttemptRecord) -> PatchAttemptResponse:
+    return PatchAttemptResponse(
+        attempt_number=att.attempt_number,
+        attempt_type=att.attempt_type,
+        repair_attempt_index=att.repair_attempt_index,
+        original_requirement=redact_secrets(att.original_requirement),
+        acceptance_criterion_ids=list(att.acceptance_criterion_ids),
+        previous_proposal_id=att.previous_proposal_id,
+        previous_patch_sha256=att.previous_patch_sha256,
+        base_snapshot_sha256=att.base_snapshot_sha256,
+        resulting_source_snapshot_sha256=att.resulting_source_snapshot_sha256,
+        resulting_git_diff_sha256=att.resulting_git_diff_sha256,
+        patch_generation=_to_patch_generation_response(att.patch_generation),
+        patch_proposal_id=att.patch_proposal_id,
+        patch_sha256=att.patch_sha256,
+        patch_validation=_to_patch_validation_response(att.patch_validation),
+        patch_application=_to_patch_application_response(att.patch_application),
+        approved_test_ids=list(att.approved_test_ids),
+        approved_test_hashes=dict(att.approved_test_hashes),
+        baseline_reused=att.baseline_reused,
+        baseline_verification=_sanitize_baseline_verification(att.baseline_verification),
+        modified_verification=_sanitize_modified_verification(att.modified_verification),
+        failure_diagnostics=[
+            diag.model_copy(
+                update={
+                    "evidence": redact_secrets(diag.evidence),
+                    "reason": redact_secrets(diag.reason),
+                    "recommendation": redact_secrets(diag.recommendation),
+                }
+            )
+            for diag in att.failure_diagnostics
+        ],
+        failure_signature=att.failure_signature,
+        baseline_comparison=_sanitize_baseline_comparison(att.baseline_comparison),
+        repair_eligibility=_sanitize_repair_eligibility(att.repair_eligibility),
+        provider_invoked=att.provider_invoked,
+        consumed_repair_budget=att.consumed_repair_budget,
+        is_deterministic_fixture=att.is_deterministic_fixture,
+        is_mock_output=att.is_mock_output,
+        model_label=att.model_label,
+        durations_ms=dict(att.durations_ms),
+        started_at=att.started_at,
+        completed_at=att.completed_at,
+        outcome=att.outcome,
+        errors=[
+            sanitized
+            for err in att.errors
+            if (sanitized := _sanitize_error(err)) is not None
+        ],
+        notes=[redact_secrets(note) for note in att.notes],
+    )
+
+
+def _to_repair_history_response(
+    hist: RepairAttemptHistory | None,
+) -> RepairAttemptHistoryResponse | None:
+    if hist is None:
+        return None
+    return RepairAttemptHistoryResponse(
+        policy=hist.policy,
+        total_proposals_attempted=hist.total_proposals_attempted,
+        repair_attempts_consumed=hist.repair_attempts_consumed,
+        current_attempt_number=hist.current_attempt_number,
+        remaining_repair_budget=hist.remaining_repair_budget,
+        attempts=[_to_patch_attempt_response(att) for att in hist.attempts],
+        seen_patch_hashes=list(hist.seen_patch_hashes),
+        seen_failure_signatures=list(hist.seen_failure_signatures),
+        last_eligibility=_sanitize_repair_eligibility(hist.last_eligibility),
+        termination_reason=hist.termination_reason,
+        termination_summary=redact_secrets(hist.termination_summary),
+        final_candidate_attempt_number=hist.final_candidate_attempt_number,
+        final_candidate_proposal_id=hist.final_candidate_proposal_id,
+        final_candidate_patch_sha256=hist.final_candidate_patch_sha256,
     )
 
 
@@ -737,6 +916,17 @@ def _to_report_response(
         patch_proposal_sha256=report.patch_proposal_sha256,
         patch_is_deterministic_fixture=report.patch_is_deterministic_fixture,
         patch_applied=report.patch_applied,
+        repair_enabled=report.repair_enabled,
+        max_repair_attempts=report.max_repair_attempts,
+        repair_attempts_consumed=report.repair_attempts_consumed,
+        current_attempt_number=report.current_attempt_number,
+        remaining_repair_budget=report.remaining_repair_budget,
+        repair_eligibility=_sanitize_repair_eligibility(report.repair_eligibility),
+        repair_termination_reason=report.repair_termination_reason,
+        repair_history=_to_repair_history_response(report.repair_history),
+        final_candidate_proposal_id=report.final_candidate_proposal_id,
+        final_candidate_patch_sha256=report.final_candidate_patch_sha256,
+        final_verification_outcome=report.final_verification_outcome,
         original_source_snapshot_sha256=report.original_source_snapshot_sha256,
         baseline_source_snapshot_sha256=report.baseline_source_snapshot_sha256,
         resulting_source_snapshot_sha256=report.resulting_source_snapshot_sha256,
@@ -807,6 +997,11 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
             run.patch_application.applied if run.patch_application is not None else None
         ),
         patch_attempt_number=run.patch_attempt_number,
+        repair_enabled=(
+            run.repair_policy.enabled if run.repair_policy is not None else None
+        ),
+        repair_attempts_consumed=run.repair_attempts_consumed,
+        repair_termination_reason=run.repair_termination_reason,
         changed_file_count=(
             len(run.codebase_analysis.changed_files_repo_relative)
             if run.codebase_analysis
@@ -869,6 +1064,52 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         git_diff_sha256=run.git_diff_sha256,
         patch_proposal_sha256=run.patch_proposal_sha256,
         patch_attempt_number=run.patch_attempt_number,
+        repair_enabled=(
+            run.repair_policy.enabled if run.repair_policy is not None else None
+        ),
+        max_repair_attempts=(
+            run.repair_policy.max_repair_attempts
+            if run.repair_policy is not None
+            else None
+        ),
+        repair_attempts_consumed=run.repair_attempts_consumed,
+        remaining_repair_budget=(
+            run.repair_history.remaining_repair_budget
+            if run.repair_history is not None
+            else (
+                max(
+                    0,
+                    run.repair_policy.effective_max_repair_attempts
+                    - run.repair_attempts_consumed,
+                )
+                if run.repair_policy is not None
+                else None
+            )
+        ),
+        repair_policy=run.repair_policy,
+        repair_eligibility=_sanitize_repair_eligibility(run.repair_eligibility),
+        repair_termination_reason=run.repair_termination_reason,
+        repair_history=_to_repair_history_response(run.repair_history),
+        final_candidate_proposal_id=(
+            run.repair_history.final_candidate_proposal_id
+            if run.repair_history is not None
+            else (
+                run.patch_generation.proposal.proposal_id
+                if run.patch_generation is not None
+                and run.patch_generation.proposal is not None
+                else None
+            )
+        ),
+        final_candidate_patch_sha256=(
+            run.repair_history.final_candidate_patch_sha256
+            if run.repair_history is not None
+            else run.patch_proposal_sha256
+        ),
+        final_verification_outcome=(
+            run.verification.verification_outcome
+            if run.verification is not None
+            else None
+        ),
         created_at=run.created_at,
         updated_at=run.updated_at,
         allowed_actions=_allowed_actions(run),

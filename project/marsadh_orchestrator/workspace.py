@@ -741,6 +741,44 @@ class WorkspaceManager:
             warnings=warnings,
         )
 
+    def prepare_clean_repair_workspace(
+        self,
+        run_id: str,
+        repository_path: str | Path,
+        resolved_base_commit: str,
+        attempt_number: int,
+        *,
+        source_path: str = ".",
+        base_ref: str = "HEAD",
+    ) -> WorkspaceContext:
+        """Create a clean isolated working copy from the immutable original commit for repair.
+
+        Implements the immutable-original-snapshot repair strategy:
+        - Reads strictly from the original Git repository at ``resolved_base_commit``
+          without mutating the original repository or reusing a dirty prior attempt workspace.
+        - Disables Git hooks, removes tracked secret ``.env*`` files, and enforces symlink
+          containment.
+        - Note: Git working-copy isolation is NOT an operating-system security sandbox.
+        """
+        if attempt_number < 2 or attempt_number > 3:
+            raise WorkspaceError(
+                f"Repair attempt number must be 2 or 3; got {attempt_number}"
+            )
+        base_ctx = self.prepare_baseline_workspace(
+            f"{run_id}_repair{attempt_number}",
+            repository_path,
+            resolved_base_commit,
+            source_path=source_path,
+            base_ref=base_ref,
+        )
+        return base_ctx.model_copy(
+            update={
+                "run_id": run_id,
+                "workspace_role": "modified",
+                "change_mode": "working_tree",
+            }
+        )
+
     def cleanup_workspace(self, workspace_path: str | Path) -> bool:
         """Safely delete a run-specific workspace strictly inside workspace_root."""
         ws_root = self.config.workspace_root.resolve()
