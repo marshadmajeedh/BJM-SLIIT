@@ -70,6 +70,7 @@ class WorkspaceContext(BaseModel):
 
     workspace_id: str
     run_id: str
+    workspace_role: Literal["modified", "baseline"] = "modified"
     original_repository_path: str
     workspace_root: str
     workspace_repo_path: str
@@ -559,6 +560,7 @@ class WorkspaceManager:
         return WorkspaceContext(
             workspace_id=workspace_id,
             run_id=run_id,
+            workspace_role="modified",
             original_repository_path=str(repo_resolved),
             workspace_root=str(ws_root),
             workspace_repo_path=str(dest_repo.resolve()),
@@ -569,6 +571,172 @@ class WorkspaceManager:
             head_commit=head_commit,
             change_mode=change_mode,
             tracked_modified_files=sorted(set(tracked_modified_files)),
+            is_trusted_for_execution=is_trusted,
+            warnings=warnings,
+        )
+
+    def prepare_baseline_workspace(
+        self,
+        run_id: str,
+        repository_path: str | Path,
+        resolved_base_commit: str,
+        *,
+        source_path: str = ".",
+        base_ref: str = "HEAD",
+    ) -> WorkspaceContext:
+        """Create a separate isolated working copy checked out to the exact resolved base commit.
+
+        Guarantees:
+        - Reads strictly from the original Git repository without mutating it.
+        - Never touches or copies from the modified workspace.
+        - Never transfers untracked files, working-tree modifications, or secret ``.env*`` files.
+        - Note: Git working-copy isolation is NOT an operating-system security sandbox.
+        """
+        if not SAFE_ID_PATTERN.match(run_id):
+            raise WorkspaceSecurityError(f"Invalid run_id for workspace naming: '{run_id}'")
+
+        raw_repo = Path(repository_path)
+        if not raw_repo.exists() or not raw_repo.is_dir():
+            raise WorkspaceError(f"Repository directory does not exist: '{repository_path}'")
+
+        repo_resolved = raw_repo.resolve(strict=True)
+        if not self.config.is_repository_allowed(repo_resolved):
+            raise WorkspaceSecurityError(
+                f"Repository '{repo_resolved}' is outside allowed_repository_roots"
+            )
+
+        toplevel_proc = self._run_git(
+            repo_resolved, "rev-parse", "--show-toplevel", check=False
+        )
+        if toplevel_proc.returncode != 0:
+            raise WorkspaceError(f"Path is not a valid Git repository: '{repo_resolved}'")
+        git_toplevel = Path(toplevel_proc.stdout.strip()).resolve()
+        if git_toplevel != repo_resolved:
+            raise WorkspaceError(
+                f"Repository path '{repo_resolved}' must be the Git repository root "
+                f"(detected root: '{git_toplevel}')"
+            )
+
+        norm_source = _validate_relative_subpath(source_path, field_name="source_path")
+        clean_base_ref = _validate_git_ref(base_ref)
+        clean_commit = _validate_git_ref(resolved_base_commit)
+
+        # Confirm the exact requested baseline commit exists in the original repository
+        verified_commit = self._run_git(
+            repo_resolved,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{clean_commit}^{{commit}}",
+        ).stdout.strip()
+
+        ws_root = self.config.workspace_root.resolve()
+        ws_root.mkdir(parents=True, exist_ok=True)
+        workspace_id = f"{run_id}_baseline_{uuid.uuid4().hex[:8]}"
+        workspace_dir = (ws_root / workspace_id).resolve()
+        if not workspace_dir.is_relative_to(ws_root) or workspace_dir == ws_root:
+            raise WorkspaceSecurityError(
+                "Computed baseline workspace directory escapes workspace_root"
+            )
+
+        workspace_dir.mkdir(parents=True, exist_ok=False)
+        dest_repo = workspace_dir / "repo"
+        no_hooks_dir = workspace_dir / "_empty_hooks"
+        no_hooks_dir.mkdir(parents=True, exist_ok=True)
+
+        warnings: list[str] = []
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    f"core.hooksPath={no_hooks_dir}",
+                    "clone",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    "--quiet",
+                    str(repo_resolved),
+                    str(dest_repo),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.config.git_timeout_seconds,
+                check=True,
+            )
+
+            verify_obj = self._run_git(
+                dest_repo,
+                "cat-file",
+                "-e",
+                f"{verified_commit}^{{commit}}",
+                check=False,
+            )
+            if verify_obj.returncode != 0:
+                self._run_git(
+                    dest_repo,
+                    "fetch",
+                    "--no-tags",
+                    "--quiet",
+                    str(repo_resolved),
+                    verified_commit,
+                )
+
+            # Checkout the exact resolved baseline commit (detached) with zero working-tree overlays
+            self._run_git(
+                dest_repo, "checkout", "--quiet", "--detach", verified_commit
+            )
+
+            # Verify source_path exists in the baseline commit and passes symlink containment
+            baseline_source = (
+                dest_repo if norm_source == "." else (dest_repo / norm_source)
+            )
+            if (
+                baseline_source.is_symlink()
+                and not baseline_source.resolve().is_relative_to(dest_repo.resolve())
+            ):
+                raise WorkspaceSecurityError(
+                    f"Baseline source_path symlink escapes workspace root: '{norm_source}'"
+                )
+            if not baseline_source.exists() or not baseline_source.is_dir():
+                raise WorkspaceError(
+                    f"Source directory '{norm_source}' does not exist at baseline commit "
+                    f"'{verified_commit[:12]}'"
+                )
+            self._check_symlink_containment(dest_repo.resolve(), baseline_source)
+
+            # Remove any tracked secret .env files from baseline workspace working tree
+            for env_candidate in dest_repo.rglob(".env*"):
+                if ".git" in env_candidate.parts:
+                    continue
+                if (
+                    env_candidate.is_file()
+                    and env_candidate.name not in ALLOWED_ENV_TEMPLATES
+                ):
+                    env_candidate.unlink()
+                    warnings.append(
+                        f"Removed secret environment file from baseline workspace: "
+                        f"{env_candidate.relative_to(dest_repo).as_posix()}"
+                    )
+        except Exception:
+            if workspace_dir.exists():
+                _safe_rmtree(workspace_dir)
+            raise
+
+        is_trusted = self.config.is_trusted_for_execution(repo_resolved)
+        return WorkspaceContext(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            workspace_role="baseline",
+            original_repository_path=str(repo_resolved),
+            workspace_root=str(ws_root),
+            workspace_repo_path=str(dest_repo.resolve()),
+            source_path=norm_source,
+            base_ref=clean_base_ref,
+            effective_base_ref=verified_commit,
+            resolved_base_commit=verified_commit,
+            head_commit=verified_commit,
+            change_mode="committed_range",
+            tracked_modified_files=[],
             is_trusted_for_execution=is_trusted,
             warnings=warnings,
         )

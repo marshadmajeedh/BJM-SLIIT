@@ -257,7 +257,9 @@ def test_full_workflow_through_both_gates_real_adapters_and_repo_unchanged(tmp_p
     assert reviewed.verification.failed == 0
     assert reviewed.verification.executed_test_ids == ["SCN-002"]
     assert reviewed.verification.coverage_status == "unavailable"
-    assert reviewed.verification.baseline_comparison.status == "unavailable"
+    assert reviewed.verification.baseline_comparison.status == "completed"
+    assert reviewed.verification.baseline_comparison.summary.preserved_behavior_count == 1
+    assert reviewed.verification.baseline_comparison.summary.newly_introduced_failure_count == 0
 
     assert reviewed.report is not None
     assert reviewed.report.package_id is not None
@@ -740,7 +742,8 @@ def test_invalid_transitions_duplicate_review_concurrent_approval_and_repeated_d
 
     assert outcomes.count("won") == 1
     assert outcomes.count("conflict") == 3
-    assert verify_call_count == 1
+    # Exactly 1 winning approval executes baseline + modified verification once (2 calls total, not 8)
+    assert verify_call_count == 2
 
     # 18. Duplicate review request after transition is rejected
     with pytest.raises(ReviewConflictError):

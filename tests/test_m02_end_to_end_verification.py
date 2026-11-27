@@ -385,8 +385,8 @@ def test_real_http_end_to_end_scenario_a_correct_and_scenario_b_regressive(tmp_p
                 3,
                 0,
             )
-            assert ver_a["baseline_comparison"]["status"] == "unavailable"
-            assert ver_a["baseline_comparison"]["newly_failing_tests"] is None
+            assert ver_a["baseline_comparison"]["status"] == "completed"
+            assert ver_a["baseline_comparison"]["newly_failing_tests"] == []
             assert ver_a["coverage_status"] == "unavailable"
 
             # Phase 5: Verify evidence integrity fields on Scenario A
@@ -400,7 +400,7 @@ def test_real_http_end_to_end_scenario_a_correct_and_scenario_b_regressive(tmp_p
             assert rep_a["traceability"]["structured_acceptance_criteria_status"] == "available"
             assert rep_a["traceability"]["criterion_mapping_status"] == "unavailable"
             assert rep_a["traceability"]["requirement_verification_proven"] is False
-            assert rep_a["traceability"]["baseline_regression_comparison_status"] == "unavailable"
+            assert rep_a["traceability"]["baseline_regression_comparison_status"] == "completed"
             assert rep_a["traceability"]["user_supplied_requirements"] == REQUIREMENT_TEXT
             assert len(rep_a["unverified_requirements"]) >= 1
             assert len(rep_a["evidence_limitations"]) >= 5

@@ -35,6 +35,13 @@ from project.marsadh_orchestrator.adapters import (
     VerificationAdapter,
     build_approved_test_specs,
 )
+from project.marsadh_orchestrator.baseline_verification import (
+    BaselineComparisonEngine,
+    BaselineTestMirrorError,
+    execute_snapshot_verification,
+    mirror_approved_tests_to_baseline,
+    resolve_scenario_test_purpose,
+)
 from project.marsadh_orchestrator.config import OrchestratorConfig
 from project.marsadh_orchestrator.patch_engine import PatchApplicator, PatchValidator
 from project.marsadh_orchestrator.requirement_analyst import (
@@ -56,6 +63,8 @@ from project.schemas import (
     AgentLogEntry,
     AmbiguitySeverity,
     ApprovedTestSpec,
+    BaselineComparisonEvidence,
+    BaselineVerificationResult,
     ChangePackageReport,
     CodebaseAnalysisResult,
     CreateRunRequest,
@@ -63,6 +72,8 @@ from project.schemas import (
     HumanDecision,
     HumanDecisionRecord,
     HumanDecisionRequest,
+    IndividualTestOutcome,
+    ModifiedVerificationResult,
     PatchGenerationRequest,
     PatchGenerationResult,
     PatchModelMetadata,
@@ -70,10 +81,12 @@ from project.schemas import (
     RequirementAnalysisResult,
     RequirementTraceability,
     RiskSummary,
+    TestComparisonClassification,
     TestGenerationResult,
     TestReviewRecord,
     TestReviewRequest,
     TraceabilityEvidenceStatus,
+    VerificationComparisonStatus,
     VerificationOutcome,
     VerificationResult,
     WorkflowMode,
@@ -111,6 +124,10 @@ ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
         WorkflowState.APPLYING_PATCH,
         WorkflowState.ANALYZING_POST_PATCH_IMPACT,
         WorkflowState.GENERATING_TESTS,
+        WorkflowState.PREPARING_BASELINE,
+        WorkflowState.RUNNING_BASELINE_VERIFICATION,
+        WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+        WorkflowState.COMPARING_VERIFICATION_RESULTS,
         WorkflowState.RUNNING_VERIFICATION,
         WorkflowState.COMPILING_REPORT,
     }
@@ -175,13 +192,40 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     ),
     WorkflowState.AWAITING_TEST_REVIEW: frozenset(
         {
+            WorkflowState.PREPARING_BASELINE,
             WorkflowState.RUNNING_VERIFICATION,
             WorkflowState.REJECTED,
             WorkflowState.FAILED,
         }
     ),
+    WorkflowState.PREPARING_BASELINE: frozenset(
+        {
+            WorkflowState.RUNNING_BASELINE_VERIFICATION,
+            WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.RUNNING_BASELINE_VERIFICATION: frozenset(
+        {
+            WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.RUNNING_MODIFIED_VERIFICATION: frozenset(
+        {
+            WorkflowState.COMPARING_VERIFICATION_RESULTS,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.COMPARING_VERIFICATION_RESULTS: frozenset(
+        {
+            WorkflowState.COMPILING_REPORT,
+            WorkflowState.FAILED,
+        }
+    ),
     WorkflowState.RUNNING_VERIFICATION: frozenset(
         {
+            WorkflowState.PREPARING_BASELINE,
             WorkflowState.COMPILING_REPORT,
             WorkflowState.FAILED,
         }
@@ -573,6 +617,8 @@ class OrchestratorService:
         live_model_callable: Callable[[str], str] | None = None,
         live_model_label: str | None = None,
         use_default_offline_stub: bool = True,
+        cleanup_baseline_workspace: bool = True,
+        before_baseline_execution_hook: Callable[[WorkflowRunRecord, Path], None] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -598,6 +644,8 @@ class OrchestratorService:
         self._offline_model_label = offline_model_label
         self._live_model_callable = live_model_callable
         self._live_model_label = live_model_label
+        self._cleanup_baseline_workspace = cleanup_baseline_workspace
+        self._before_baseline_execution_hook = before_baseline_execution_hook
 
     # ------------------------------------------------------------------
     # Persistence & structured logging helpers
@@ -2453,18 +2501,18 @@ class OrchestratorService:
             notes=request.notes,
         )
 
-        # Atomically claim AWAITING_TEST_REVIEW -> RUNNING_VERIFICATION so concurrent approvals cannot race!
+        # Atomically claim AWAITING_TEST_REVIEW -> PREPARING_BASELINE so concurrent approvals cannot race!
         try:
             claimed = self.transition_state(
                 run_id,
                 WorkflowState.AWAITING_TEST_REVIEW,
-                WorkflowState.RUNNING_VERIFICATION,
+                WorkflowState.PREPARING_BASELINE,
                 updater=lambda current: current.model_copy(
                     update={"test_review": initial_review}
                 ),
                 reason=(
                     f"Human reviewer '{request.reviewer}' approved "
-                    f"{len(request.selected_test_ids)} test scenario(s); claimed verification slot."
+                    f"{len(request.selected_test_ids)} test scenario(s); claimed baseline-and-modified verification slot."
                 ),
             )
         except InvalidStateTransitionError as exc:
@@ -2477,16 +2525,16 @@ class OrchestratorService:
         self._log(
             run_id=run_id,
             agent_name="HumanTestReviewGate",
-            stage=WorkflowState.RUNNING_VERIFICATION,
+            stage=WorkflowState.PREPARING_BASELINE,
             status=AgentExecutionStatus.SUCCEEDED,
             input_summary=(
                 f"reviewer={request.reviewer}, approved=True, "
                 f"selected={request.selected_test_ids}"
             ),
-            output_summary="Approved scenarios accepted; exporting selected tests for verification.",
+            output_summary="Approved scenarios accepted; exporting selected tests for baseline and modified verification.",
         )
 
-        # Export ONLY selected approved scenarios into isolated workspace
+        # Export ONLY selected approved scenarios into isolated modified workspace
         assert claimed.workspace_path is not None
         assert claimed.test_generation is not None
         export_t0 = time.perf_counter()
@@ -2505,14 +2553,14 @@ class OrchestratorService:
             self._log(
                 run_id=run_id,
                 agent_name="TestingAdapter",
-                stage=WorkflowState.RUNNING_VERIFICATION,
+                stage=WorkflowState.PREPARING_BASELINE,
                 status=AgentExecutionStatus.FAILED,
                 duration_ms=export_dur_ms,
                 input_summary=f"export selected={request.selected_test_ids}",
                 output_summary=err.message,
                 error=err,
             )
-            failed = self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
+            failed = self._fail_run(run_id, WorkflowState.PREPARING_BASELINE, err)
             return failed, None
 
         # Mark selected scenarios approved and build hash-verified ApprovedTestSpec registry
@@ -2533,19 +2581,19 @@ class OrchestratorService:
             self._log(
                 run_id=run_id,
                 agent_name="TestingAdapter",
-                stage=WorkflowState.RUNNING_VERIFICATION,
+                stage=WorkflowState.PREPARING_BASELINE,
                 status=AgentExecutionStatus.FAILED,
                 duration_ms=export_dur_ms,
                 output_summary=err.message,
                 error=err,
             )
-            failed = self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
+            failed = self._fail_run(run_id, WorkflowState.PREPARING_BASELINE, err)
             return failed, None
 
         self._log(
             run_id=run_id,
             agent_name="TestingAdapter",
-            stage=WorkflowState.RUNNING_VERIFICATION,
+            stage=WorkflowState.PREPARING_BASELINE,
             status=AgentExecutionStatus.SUCCEEDED,
             duration_ms=export_dur_ms,
             input_summary=f"export selected={request.selected_test_ids}",
@@ -2556,7 +2604,7 @@ class OrchestratorService:
 
         updated = self.store.update_run_atomic(
             run_id,
-            expected_state=WorkflowState.RUNNING_VERIFICATION,
+            expected_state=WorkflowState.PREPARING_BASELINE,
             updater=lambda current: current.model_copy(
                 update={
                     "test_generation": exported_marked,
@@ -2613,16 +2661,21 @@ class OrchestratorService:
         *,
         execute_immediately: bool = True,
     ) -> WorkflowRunRecord:
-        """Process Human Review Gate 1 and optionally execute M04 verification immediately."""
+        """Process Human Review Gate 1 and optionally execute baseline+modified verification."""
         updated, approved_specs = self.accept_test_review(run_id, request)
-        if not request.approved or approved_specs is None or updated.state != WorkflowState.RUNNING_VERIFICATION:
+        if (
+            not request.approved
+            or approved_specs is None
+            or updated.state
+            not in {WorkflowState.PREPARING_BASELINE, WorkflowState.RUNNING_VERIFICATION}
+        ):
             return updated
         if not execute_immediately:
             return updated
         return self.execute_verification_and_report(run_id, approved_specs)
 
     # ------------------------------------------------------------------
-    # Phase 7 & 8: M04 Verification Execution & Change Package Compilation
+    # Phase 7 & 8: Baseline + Modified Verification, Comparison & Report Compilation
     # ------------------------------------------------------------------
 
     def execute_verification_and_report(
@@ -2630,9 +2683,16 @@ class OrchestratorService:
         run_id: str,
         approved_specs: Mapping[str, ApprovedTestSpec] | None = None,
     ) -> WorkflowRunRecord:
-        """Execute M04 verification for approved scenarios and compile ChangePackageReport."""
+        """Prepare baseline, execute identical approved tests on baseline & modified, compare, and compile report."""
         run = self.get_run(run_id)
-        if run.state != WorkflowState.RUNNING_VERIFICATION:
+        if run.state == WorkflowState.RUNNING_VERIFICATION:
+            run = self.transition_state(
+                run_id,
+                WorkflowState.RUNNING_VERIFICATION,
+                WorkflowState.PREPARING_BASELINE,
+                reason="Transitioning legacy RUNNING_VERIFICATION run into baseline preparation.",
+            )
+        elif run.state != WorkflowState.PREPARING_BASELINE:
             raise InvalidStateTransitionError(
                 f"Cannot execute verification when run '{run_id}' is in state '{run.state.value}'.",
                 run_id=run_id,
@@ -2643,9 +2703,9 @@ class OrchestratorService:
                 code="MISSING_TEST_APPROVAL",
                 message="Approved test generation and human review records are required before verification.",
             )
-            return self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
+            return self._fail_run(run_id, WorkflowState.PREPARING_BASELINE, err)
 
-        # Re-verify workspace source snapshot right before executing tests
+        # Re-verify modified workspace source snapshot before baseline preparation
         try:
             self._verify_workspace_snapshot(run)
         except WorkflowIntegrityError as exc:
@@ -2653,12 +2713,12 @@ class OrchestratorService:
             self._log(
                 run_id=run_id,
                 agent_name="IntegrityVerifier",
-                stage=WorkflowState.RUNNING_VERIFICATION,
+                stage=WorkflowState.PREPARING_BASELINE,
                 status=AgentExecutionStatus.FAILED,
                 output_summary=exc.message,
                 error=err,
             )
-            return self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
+            return self._fail_run(run_id, WorkflowState.PREPARING_BASELINE, err)
 
         specs: Mapping[str, ApprovedTestSpec]
         if approved_specs is not None:
@@ -2668,7 +2728,7 @@ class OrchestratorService:
                 specs = build_approved_test_specs(run.test_generation, run.test_review)
             except ValueError as exc:
                 err = AgentError(code="APPROVED_SPEC_BUILD_ERROR", message=str(exc))
-                return self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
+                return self._fail_run(run_id, WorkflowState.PREPARING_BASELINE, err)
 
         # Derive execution trust strictly from server configuration & validated source repository path.
         is_trusted_workspace = self.config.is_trusted_for_execution(
@@ -2676,121 +2736,616 @@ class OrchestratorService:
         )
         assert run.workspace_path is not None
 
-        m04_started = utc_now()
-        m04_t0 = time.perf_counter()
-        self._log(
-            run_id=run_id,
-            agent_name="VerificationAdapter",
-            stage=WorkflowState.RUNNING_VERIFICATION,
-            status=AgentExecutionStatus.SUCCEEDED,
-            input_summary=(
-                f"Executing {len(run.test_review.selected_test_ids)} approved scenario(s) "
-                f"(timeout={self.config.verification_timeout_seconds}s, "
-                f"trusted={is_trusted_workspace})."
-            ),
-            output_summary="Invoked M04 VerificationAdapter.verify.",
-        )
+        selected_ids = list(run.test_review.selected_test_ids)
+        scenarios_by_id = {sc.scenario_id: sc for sc in run.test_generation.scenarios}
+        test_purposes = {
+            sid: resolve_scenario_test_purpose(scenarios_by_id[sid], run.requirement_analysis)
+            for sid in selected_ids
+            if sid in scenarios_by_id
+        }
+        criterion_ids_by_test = {
+            sid: list(scenarios_by_id[sid].criterion_ids)
+            for sid in selected_ids
+            if sid in scenarios_by_id
+        }
+        baseline_ref_label = run.repository.resolved_base_commit or run.repository.base_ref
+
+        baseline_workspace_path: str | None = None
+        baseline_snapshot_sha: str | None = None
+        baseline_result: BaselineVerificationResult | None = None
 
         try:
-            ver_result = self.verification_adapter.verify(
-                run.workspace_path,
-                run.test_review.selected_test_ids,
-                specs,
-                timeout_seconds=self.config.verification_timeout_seconds,
-                is_trusted_workspace=is_trusted_workspace,
-                baseline_ref=run.repository.resolved_base_commit or run.repository.base_ref,
+            # ---- Stage 4A: PREPARING_BASELINE ----
+            base_prep_started = utc_now()
+            base_prep_t0 = time.perf_counter()
+            resolved_base_commit = run.repository.resolved_base_commit
+            baseline_ready = False
+
+            if not resolved_base_commit:
+                prep_err = AgentError(
+                    code="BASELINE_COMMIT_UNAVAILABLE",
+                    message=(
+                        "Resolved baseline Git commit is unavailable; proceeding with modified "
+                        "verification only and marking baseline comparison incomplete."
+                    ),
+                )
+                baseline_result = BaselineVerificationResult(
+                    execution_status="unavailable",
+                    verification_outcome=VerificationOutcome.UNAVAILABLE,
+                    baseline_ref=baseline_ref_label,
+                    baseline_commit=None,
+                    evidence_limitations=[prep_err.message],
+                    error=prep_err,
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="WorkspaceManager",
+                    stage=WorkflowState.PREPARING_BASELINE,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=int((time.perf_counter() - base_prep_t0) * 1000),
+                    output_summary=prep_err.message,
+                    error=prep_err,
+                )
+            else:
+                try:
+                    base_ws_ctx = self.workspace_manager.prepare_baseline_workspace(
+                        run_id,
+                        run.repository.repository_path,
+                        resolved_base_commit,
+                        source_path=run.repository.source_path,
+                        base_ref=run.repository.base_ref,
+                    )
+                    baseline_workspace_path = base_ws_ctx.workspace_repo_path
+                    baseline_snapshot_sha = compute_source_snapshot_sha256(
+                        baseline_workspace_path,
+                        base_ws_ctx.source_path,
+                    )
+                    mirrored_hashes = mirror_approved_tests_to_baseline(
+                        run.workspace_path,
+                        baseline_workspace_path,
+                        specs,
+                        selected_ids,
+                    )
+                    baseline_ready = True
+                except BaselineTestMirrorError as exc:
+                    err = AgentError(code=exc.code, message=exc.message, details=exc.details)
+                    self._log(
+                        run_id=run_id,
+                        agent_name="IntegrityVerifier",
+                        stage=WorkflowState.PREPARING_BASELINE,
+                        status=AgentExecutionStatus.FAILED,
+                        duration_ms=int((time.perf_counter() - base_prep_t0) * 1000),
+                        output_summary=exc.message,
+                        error=err,
+                    )
+                    return self._fail_run(
+                        run_id,
+                        WorkflowState.PREPARING_BASELINE,
+                        err,
+                        reason=exc.message,
+                    )
+                except (WorkspaceError, WorkspaceSecurityError, Exception) as exc:  # noqa: BLE001
+                    prep_err = AgentError(
+                        code="BASELINE_WORKSPACE_UNAVAILABLE",
+                        message=(
+                            f"Baseline workspace could not be prepared for commit "
+                            f"'{resolved_base_commit[:12]}': {exc}. Proceeding with modified "
+                            "verification only and marking baseline comparison incomplete."
+                        ),
+                    )
+                    baseline_result = BaselineVerificationResult(
+                        execution_status="unavailable",
+                        verification_outcome=VerificationOutcome.UNAVAILABLE,
+                        baseline_ref=baseline_ref_label,
+                        baseline_commit=resolved_base_commit,
+                        evidence_limitations=[prep_err.message],
+                        error=prep_err,
+                    )
+                    self._log(
+                        run_id=run_id,
+                        agent_name="WorkspaceManager",
+                        stage=WorkflowState.PREPARING_BASELINE,
+                        status=AgentExecutionStatus.FAILED,
+                        duration_ms=int((time.perf_counter() - base_prep_t0) * 1000),
+                        input_summary=f"baseline_commit={resolved_base_commit[:12]}",
+                        output_summary=prep_err.message,
+                        error=prep_err,
+                    )
+
+            base_prep_dur_ms = int((time.perf_counter() - base_prep_t0) * 1000)
+
+            if baseline_ready:
+                assert baseline_workspace_path is not None
+                assert baseline_snapshot_sha is not None
+                assert resolved_base_commit is not None
+                prep_summary = (
+                    f"Prepared separate baseline workspace '{base_ws_ctx.workspace_id}' at commit "
+                    f"{resolved_base_commit[:12]} (snapshot={baseline_snapshot_sha[:12]}) and "
+                    f"mirrored {len(mirrored_hashes)} identical approved test file(s) with verified SHA-256 hashes."
+                )
+                prep_rec = AgentExecutionRecord(
+                    agent_name="WorkspaceManager",
+                    stage=WorkflowState.PREPARING_BASELINE.value,
+                    status=AgentExecutionStatus.SUCCEEDED,
+                    started_at=base_prep_started,
+                    completed_at=utc_now(),
+                    duration_ms=base_prep_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=prep_summary,
+                    assumptions=[
+                        *list(base_ws_ctx.warnings),
+                        "Git baseline workspace isolation protects the original repository and modified workspace; it is not an OS security sandbox.",
+                    ],
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="WorkspaceManager",
+                    stage=WorkflowState.PREPARING_BASELINE,
+                    status=AgentExecutionStatus.SUCCEEDED,
+                    duration_ms=base_prep_dur_ms,
+                    input_summary=f"baseline_commit={resolved_base_commit[:12]}, scenarios={selected_ids}",
+                    output_summary=prep_summary,
+                )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.PREPARING_BASELINE,
+                    WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "baseline_workspace_id": base_ws_ctx.workspace_id,
+                            "baseline_workspace_path": baseline_workspace_path,
+                            "baseline_source_snapshot_sha256": baseline_snapshot_sha,
+                            "agent_records": [*current.agent_records, prep_rec],
+                        }
+                    ),
+                    reason="Baseline workspace prepared with identical approved tests; executing baseline verification.",
+                )
+
+                # ---- Stage 4B: RUNNING_BASELINE_VERIFICATION ----
+                if self._before_baseline_execution_hook is not None:
+                    self._before_baseline_execution_hook(run, Path(baseline_workspace_path))
+
+                # Re-verify baseline workspace source snapshot integrity right before running tests
+                try:
+                    actual_base_snap = compute_source_snapshot_sha256(
+                        baseline_workspace_path,
+                        run.repository.source_path,
+                    )
+                except WorkspaceError as exc:
+                    err = AgentError(
+                        code="BASELINE_WORKSPACE_TAMPERED",
+                        message=f"Failed to verify baseline workspace snapshot before execution: {exc}",
+                    )
+                    self._log(
+                        run_id=run_id,
+                        agent_name="IntegrityVerifier",
+                        stage=WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        status=AgentExecutionStatus.FAILED,
+                        output_summary=err.message,
+                        error=err,
+                    )
+                    return self._fail_run(
+                        run_id, WorkflowState.RUNNING_BASELINE_VERIFICATION, err
+                    )
+
+                if not hmac.compare_digest(actual_base_snap, baseline_snapshot_sha):
+                    err = AgentError(
+                        code="BASELINE_WORKSPACE_TAMPERED",
+                        message=(
+                            "Baseline workspace source snapshot changed before baseline test execution; "
+                            "refusing to execute verification against tampered baseline."
+                        ),
+                        details={
+                            "expected_baseline_snapshot_sha256": baseline_snapshot_sha,
+                            "actual_baseline_snapshot_sha256": actual_base_snap,
+                        },
+                    )
+                    self._log(
+                        run_id=run_id,
+                        agent_name="IntegrityVerifier",
+                        stage=WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        status=AgentExecutionStatus.FAILED,
+                        output_summary=err.message,
+                        error=err,
+                    )
+                    return self._fail_run(
+                        run_id, WorkflowState.RUNNING_BASELINE_VERIFICATION, err
+                    )
+
+                base_ver_started = utc_now()
+                base_ver_t0 = time.perf_counter()
+                self._log(
+                    run_id=run_id,
+                    agent_name="VerificationAdapter",
+                    stage=WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                    status=AgentExecutionStatus.SUCCEEDED,
+                    input_summary=(
+                        f"Executing {len(selected_ids)} approved scenario(s) on baseline commit "
+                        f"{resolved_base_commit[:12]} (trusted={is_trusted_workspace})."
+                    ),
+                    output_summary="Invoked M04 VerificationAdapter on baseline workspace.",
+                )
+                try:
+                    snap_base_res, _base_agg, base_integrity_err = (
+                        execute_snapshot_verification(
+                            self.verification_adapter,
+                            self.config,
+                            snapshot_role="baseline",
+                            workspace_path=baseline_workspace_path,
+                            source_path=run.repository.source_path,
+                            selected_test_ids=selected_ids,
+                            approved_specs=specs,
+                            test_purposes=test_purposes,
+                            criterion_ids_by_test=criterion_ids_by_test,
+                            is_trusted_workspace=is_trusted_workspace,
+                            source_snapshot_sha256=baseline_snapshot_sha,
+                            baseline_ref=baseline_ref_label,
+                            baseline_commit=resolved_base_commit,
+                        )
+                    )
+                    assert isinstance(snap_base_res, BaselineVerificationResult)
+                    baseline_result = snap_base_res
+                except Exception as exc:  # noqa: BLE001
+                    base_ver_dur_ms = int((time.perf_counter() - base_ver_t0) * 1000)
+                    base_err = AgentError(
+                        code="M04_BASELINE_UNEXPECTED_ERROR",
+                        message=f"Baseline verification raised an unexpected exception: {exc}",
+                    )
+                    baseline_result = BaselineVerificationResult(
+                        execution_status="error",
+                        verification_outcome=VerificationOutcome.EXECUTION_ERROR,
+                        baseline_ref=baseline_ref_label,
+                        baseline_commit=resolved_base_commit,
+                        source_snapshot_sha256=baseline_snapshot_sha,
+                        evidence_limitations=[base_err.message],
+                        error=base_err,
+                    )
+                    base_integrity_err = None
+                    self._log(
+                        run_id=run_id,
+                        agent_name="VerificationAdapter",
+                        stage=WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        status=AgentExecutionStatus.FAILED,
+                        duration_ms=base_ver_dur_ms,
+                        output_summary=base_err.message,
+                        error=base_err,
+                    )
+                else:
+                    base_ver_dur_ms = int((time.perf_counter() - base_ver_t0) * 1000)
+
+                base_exec_status = (
+                    AgentExecutionStatus.TIMEOUT
+                    if baseline_result.verification_outcome == VerificationOutcome.TIMEOUT
+                    else (
+                        AgentExecutionStatus.SUCCEEDED
+                        if baseline_result.execution_status == "completed"
+                        else AgentExecutionStatus.FAILED
+                    )
+                )
+                base_summary = (
+                    f"Baseline verification outcome={baseline_result.verification_outcome.value}, "
+                    f"exit_code={baseline_result.exit_code}, "
+                    f"total={baseline_result.total_tests}, passed={baseline_result.passed}, "
+                    f"failed={baseline_result.failed}."
+                )
+                base_rec = AgentExecutionRecord(
+                    agent_name="VerificationAdapter",
+                    stage=WorkflowState.RUNNING_BASELINE_VERIFICATION.value,
+                    status=base_exec_status,
+                    started_at=base_ver_started,
+                    completed_at=utc_now(),
+                    duration_ms=base_ver_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=base_summary,
+                    error=baseline_result.error,
+                    assumptions=list(baseline_result.evidence_limitations),
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="VerificationAdapter",
+                    stage=WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                    status=base_exec_status,
+                    duration_ms=base_ver_dur_ms,
+                    input_summary=f"baseline scenarios={selected_ids}",
+                    output_summary=base_summary,
+                    error=baseline_result.error,
+                )
+
+                if base_integrity_err is not None:
+                    return self._fail_run(
+                        run_id,
+                        WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                        base_integrity_err,
+                        updater=lambda current: current.model_copy(
+                            update={
+                                "baseline_verification": baseline_result,
+                                "agent_records": [*current.agent_records, base_rec],
+                            }
+                        ),
+                        reason=base_integrity_err.message,
+                    )
+
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.RUNNING_BASELINE_VERIFICATION,
+                    WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "baseline_verification": baseline_result,
+                            "agent_records": [*current.agent_records, base_rec],
+                        }
+                    ),
+                    reason="Baseline verification completed; executing identical approved tests against modified workspace.",
+                )
+            else:
+                # Baseline unavailable: gracefully preserve useful modified verification results!
+                prep_fail_rec = AgentExecutionRecord(
+                    agent_name="WorkspaceManager",
+                    stage=WorkflowState.PREPARING_BASELINE.value,
+                    status=AgentExecutionStatus.FAILED,
+                    started_at=base_prep_started,
+                    completed_at=utc_now(),
+                    duration_ms=base_prep_dur_ms,
+                    execution_mode=run.execution_mode.value,
+                    output_summary=(
+                        baseline_result.error.message
+                        if baseline_result and baseline_result.error
+                        else "Baseline workspace unavailable."
+                    ),
+                    error=baseline_result.error if baseline_result else None,
+                )
+                run = self.transition_state(
+                    run_id,
+                    WorkflowState.PREPARING_BASELINE,
+                    WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "baseline_verification": baseline_result,
+                            "agent_records": [*current.agent_records, prep_fail_rec],
+                        }
+                    ),
+                    reason=(
+                        "Baseline workspace unavailable; proceeding to modified workspace verification "
+                        "(comparison will be marked incomplete)."
+                    ),
+                )
+
+            # ---- Stage 4C: RUNNING_MODIFIED_VERIFICATION ----
+            # Re-verify modified workspace snapshot right before running tests
+            try:
+                self._verify_workspace_snapshot(run)
+            except WorkflowIntegrityError as exc:
+                err = AgentError(code=exc.code, message=exc.message, details=exc.details)
+                self._log(
+                    run_id=run_id,
+                    agent_name="IntegrityVerifier",
+                    stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    status=AgentExecutionStatus.FAILED,
+                    output_summary=exc.message,
+                    error=err,
+                )
+                return self._fail_run(
+                    run_id, WorkflowState.RUNNING_MODIFIED_VERIFICATION, err
+                )
+
+            m04_started = utc_now()
+            m04_t0 = time.perf_counter()
+            self._log(
+                run_id=run_id,
+                agent_name="VerificationAdapter",
+                stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                status=AgentExecutionStatus.SUCCEEDED,
+                input_summary=(
+                    f"Executing {len(selected_ids)} approved scenario(s) on modified workspace "
+                    f"(timeout={self.config.verification_timeout_seconds}s, "
+                    f"trusted={is_trusted_workspace})."
+                ),
+                output_summary="Invoked M04 VerificationAdapter on modified workspace.",
             )
-        except Exception as exc:  # noqa: BLE001
+
+            try:
+                snap_mod_res, ver_result, mod_integrity_err = (
+                    execute_snapshot_verification(
+                        self.verification_adapter,
+                        self.config,
+                        snapshot_role="modified",
+                        workspace_path=run.workspace_path,
+                        source_path=run.repository.source_path,
+                        selected_test_ids=selected_ids,
+                        approved_specs=specs,
+                        test_purposes=test_purposes,
+                        criterion_ids_by_test=criterion_ids_by_test,
+                        is_trusted_workspace=is_trusted_workspace,
+                        source_snapshot_sha256=run.source_snapshot_sha256,
+                        git_diff_sha256=run.git_diff_sha256,
+                        baseline_ref=baseline_ref_label,
+                        baseline_commit=run.repository.resolved_base_commit,
+                    )
+                )
+                assert isinstance(snap_mod_res, ModifiedVerificationResult)
+                modified_result = snap_mod_res
+            except Exception as exc:  # noqa: BLE001
+                m04_dur_ms = int((time.perf_counter() - m04_t0) * 1000)
+                err = AgentError(
+                    code="M04_UNEXPECTED_ERROR",
+                    message=f"VerificationAdapter raised an unexpected exception: {exc}",
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="VerificationAdapter",
+                    stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=m04_dur_ms,
+                    output_summary="M04 modified verification failed with unexpected exception.",
+                    error=err,
+                )
+                return self._fail_run(
+                    run_id, WorkflowState.RUNNING_MODIFIED_VERIFICATION, err
+                )
+
             m04_dur_ms = int((time.perf_counter() - m04_t0) * 1000)
-            err = AgentError(
-                code="M04_UNEXPECTED_ERROR",
-                message=f"VerificationAdapter raised an unexpected exception: {exc}",
+            m04_exec_status = (
+                AgentExecutionStatus.TIMEOUT
+                if ver_result.verification_outcome == VerificationOutcome.TIMEOUT
+                else (
+                    AgentExecutionStatus.SUCCEEDED
+                    if ver_result.execution_status == "completed"
+                    else AgentExecutionStatus.FAILED
+                )
+            )
+            m04_summary = (
+                f"Modified verification outcome={ver_result.verification_outcome.value}, "
+                f"passed_flag={ver_result.verification_passed}, "
+                f"exit_code={ver_result.exit_code}, "
+                f"total={ver_result.total_tests}, passed={ver_result.passed}, failed={ver_result.failed}."
+            )
+            m04_rec = AgentExecutionRecord(
+                agent_name="VerificationAdapter",
+                stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION.value,
+                status=m04_exec_status,
+                started_at=m04_started,
+                completed_at=utc_now(),
+                duration_ms=m04_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=m04_summary,
+                error=ver_result.error,
+                assumptions=list(ver_result.assumptions),
             )
             self._log(
                 run_id=run_id,
                 agent_name="VerificationAdapter",
-                stage=WorkflowState.RUNNING_VERIFICATION,
-                status=AgentExecutionStatus.FAILED,
+                stage=WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                status=m04_exec_status,
                 duration_ms=m04_dur_ms,
-                output_summary="M04 verification failed with unexpected exception.",
-                error=err,
+                input_summary=f"modified scenarios={selected_ids}",
+                output_summary=m04_summary,
+                error=ver_result.error,
             )
-            return self._fail_run(run_id, WorkflowState.RUNNING_VERIFICATION, err)
 
-        m04_dur_ms = int((time.perf_counter() - m04_t0) * 1000)
-        m04_exec_status = (
-            AgentExecutionStatus.TIMEOUT
-            if ver_result.verification_outcome == VerificationOutcome.TIMEOUT
-            else (
-                AgentExecutionStatus.SUCCEEDED
-                if ver_result.execution_status == "completed"
-                else AgentExecutionStatus.FAILED
-            )
-        )
-        m04_summary = (
-            f"Verification outcome={ver_result.verification_outcome.value}, "
-            f"passed_flag={ver_result.verification_passed}, "
-            f"exit_code={ver_result.exit_code}, "
-            f"total={ver_result.total_tests}, passed={ver_result.passed}, failed={ver_result.failed}."
-        )
-        m04_rec = AgentExecutionRecord(
-            agent_name="VerificationAdapter",
-            stage=WorkflowState.RUNNING_VERIFICATION.value,
-            status=m04_exec_status,
-            started_at=m04_started,
-            completed_at=utc_now(),
-            duration_ms=m04_dur_ms,
-            execution_mode=run.execution_mode.value,
-            output_summary=m04_summary,
-            error=ver_result.error,
-            assumptions=list(ver_result.assumptions),
-        )
-        self._log(
-            run_id=run_id,
-            agent_name="VerificationAdapter",
-            stage=WorkflowState.RUNNING_VERIFICATION,
-            status=m04_exec_status,
-            duration_ms=m04_dur_ms,
-            input_summary=f"scenarios={run.test_review.selected_test_ids}",
-            output_summary=m04_summary,
-            error=ver_result.error,
-        )
+            # Hard integrity failure on exported test files stops the workflow immediately.
+            if mod_integrity_err is not None:
+                return self._fail_run(
+                    run_id,
+                    WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                    mod_integrity_err,
+                    updater=lambda current: current.model_copy(
+                        update={
+                            "modified_verification": modified_result,
+                            "verification": ver_result,
+                            "agent_records": [*current.agent_records, m04_rec],
+                        }
+                    ),
+                    reason=mod_integrity_err.message,
+                )
 
-        # Hard integrity failure on exported test files stops the workflow immediately.
-        if ver_result.error is not None and ver_result.error.code in {
-            "TEST_CONTENT_MODIFIED",
-            "UNAUTHORIZED_TEST_PATH",
-            "TEST_FILE_MISSING",
-            "WORKSPACE_NOT_FOUND",
-        }:
-            return self._fail_run(
+            run = self.transition_state(
                 run_id,
-                WorkflowState.RUNNING_VERIFICATION,
-                ver_result.error,
+                WorkflowState.RUNNING_MODIFIED_VERIFICATION,
+                WorkflowState.COMPARING_VERIFICATION_RESULTS,
                 updater=lambda current: current.model_copy(
                     update={
+                        "modified_verification": modified_result,
                         "verification": ver_result,
                         "agent_records": [*current.agent_records, m04_rec],
                     }
                 ),
-                reason=ver_result.error.message,
+                reason="Modified verification completed; comparing baseline and modified verification evidence.",
             )
 
-        # Transition RUNNING_VERIFICATION -> COMPILING_REPORT
-        run = self.transition_state(
-            run_id,
-            WorkflowState.RUNNING_VERIFICATION,
-            WorkflowState.COMPILING_REPORT,
-            updater=lambda current: current.model_copy(
-                update={
-                    "verification": ver_result,
-                    "agent_records": [*current.agent_records, m04_rec],
-                }
-            ),
-            reason="Verification completed; compiling auditable change package report.",
-        )
+            # ---- Stage 4D: COMPARING_VERIFICATION_RESULTS ----
+            cmp_started = utc_now()
+            cmp_t0 = time.perf_counter()
+            try:
+                comparison = BaselineComparisonEngine.compare(
+                    baseline=baseline_result,
+                    modified=modified_result,
+                    approved_test_hashes=run.test_review.approved_test_hashes,
+                    baseline_ref=baseline_ref_label,
+                    baseline_commit=run.repository.resolved_base_commit,
+                    baseline_source_snapshot_sha256=baseline_snapshot_sha,
+                    modified_source_snapshot_sha256=run.source_snapshot_sha256,
+                )
+            except Exception as exc:  # noqa: BLE001
+                cmp_dur_ms = int((time.perf_counter() - cmp_t0) * 1000)
+                err = AgentError(
+                    code="COMPARISON_ENGINE_ERROR",
+                    message=f"Baseline comparison engine failed unexpectedly: {exc}",
+                )
+                self._log(
+                    run_id=run_id,
+                    agent_name="BaselineComparisonEngine",
+                    stage=WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                    status=AgentExecutionStatus.FAILED,
+                    duration_ms=cmp_dur_ms,
+                    output_summary=err.message,
+                    error=err,
+                )
+                return self._fail_run(
+                    run_id, WorkflowState.COMPARING_VERIFICATION_RESULTS, err
+                )
 
-        # ---- Stage 4: Compile Auditable Change Package ----
+            cmp_dur_ms = int((time.perf_counter() - cmp_t0) * 1000)
+            ver_result = ver_result.model_copy(
+                update={"baseline_comparison": comparison}
+            )
+            cmp_summary = (
+                f"Comparison status={comparison.status.value}: "
+                f"preserved={comparison.summary.preserved_behavior_count}, "
+                f"newly_introduced_failures={comparison.summary.newly_introduced_failure_count}, "
+                f"newly_satisfied_acceptance={comparison.summary.newly_satisfied_acceptance_count}, "
+                f"fixed_existing={comparison.summary.fixed_existing_failure_count}, "
+                f"persistent_failures={comparison.summary.persistent_failure_count}, "
+                f"uncomparable_or_unavailable={len(comparison.summary.unavailable_or_incomparable)}."
+            )
+            cmp_rec = AgentExecutionRecord(
+                agent_name="BaselineComparisonEngine",
+                stage=WorkflowState.COMPARING_VERIFICATION_RESULTS.value,
+                status=AgentExecutionStatus.SUCCEEDED,
+                started_at=cmp_started,
+                completed_at=utc_now(),
+                duration_ms=cmp_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=cmp_summary,
+                assumptions=list(comparison.evidence_limitations),
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="BaselineComparisonEngine",
+                stage=WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                status=AgentExecutionStatus.SUCCEEDED,
+                duration_ms=cmp_dur_ms,
+                input_summary=(
+                    f"baseline={baseline_result.verification_outcome.value if baseline_result else 'none'}, "
+                    f"modified={modified_result.verification_outcome.value}"
+                ),
+                output_summary=cmp_summary,
+            )
+
+            # Transition COMPARING_VERIFICATION_RESULTS -> COMPILING_REPORT
+            run = self.transition_state(
+                run_id,
+                WorkflowState.COMPARING_VERIFICATION_RESULTS,
+                WorkflowState.COMPILING_REPORT,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "verification": ver_result,
+                        "baseline_comparison": comparison,
+                        "agent_records": [*current.agent_records, cmp_rec],
+                    }
+                ),
+                reason=(
+                    f"Baseline-versus-modified comparison finished (status={comparison.status.value}); "
+                    "compiling auditable change package report."
+                ),
+            )
+        finally:
+            if self._cleanup_baseline_workspace and baseline_workspace_path:
+                try:
+                    self.workspace_manager.cleanup_workspace(baseline_workspace_path)
+                except WorkspaceError:
+                    pass
+
+        # ---- Stage 5: Compile Auditable Change Package ----
         report_t0 = time.perf_counter()
         try:
             logs = self.store.get_logs(run_id)
@@ -2817,7 +3372,10 @@ class OrchestratorService:
             stage=WorkflowState.COMPILING_REPORT,
             status=AgentExecutionStatus.SUCCEEDED,
             duration_ms=report_dur_ms,
-            input_summary=f"verification_outcome={ver_result.verification_outcome.value}",
+            input_summary=(
+                f"verification_outcome={ver_result.verification_outcome.value}, "
+                f"comparison_status={ver_result.baseline_comparison.status.value}"
+            ),
             output_summary=(
                 f"Compiled change package '{report.package_id}' "
                 f"(recommendation_label={report.recommendation_label})."
@@ -2869,7 +3427,8 @@ class OrchestratorService:
                 "structured_acceptance_criteria_status": "unavailable",
                 "criterion_mapping_status": "unavailable",
                 "requirement_verification_proven": False,
-                "baseline_regression_comparison_status": verification.baseline_comparison.status,
+                "complete_requirement_assurance": False,
+                "baseline_regression_comparison_status": verification.baseline_comparison.status.value,
                 "user_supplied_requirements": run.requirements,
                 "changed_files": changed_files,
                 "impacted_modules": impacted_modules,
@@ -2924,12 +3483,18 @@ class OrchestratorService:
                     if amb.ambiguity_id not in blocking_by_criterion[cid]:
                         blocking_by_criterion[cid].append(amb.ambiguity_id)
 
-        # Build file failure lookup from M04 failure diagnostics
+        # Build file failure lookup & per-scenario baseline comparison lookup
         failure_test_names = [f.test_name for f in verification.failures]
         has_unattributable_failure = any(
             name in {"pytest_execution", "pytest_runner", "pytest_collection", "unknown_test"}
             for name in failure_test_names
         )
+        comparison = verification.baseline_comparison
+        comparisons_by_scenario = {
+            tc.scenario_id: tc
+            for tc in comparison.test_comparisons
+            if tc.scenario_id is not None
+        }
 
         entries: list[RequirementTraceability] = []
         verified_ids: list[str] = []
@@ -2956,6 +3521,20 @@ class OrchestratorService:
 
             affected_files = list(changed_files)
             file_map_status = "repository_scope_only" if affected_files else "unavailable"
+
+            matched_comparisons = [
+                comparisons_by_scenario[sid]
+                for sid in exe_scn_ids
+                if sid in comparisons_by_scenario
+            ]
+            has_regressed_scenario = any(
+                tc.classification == TestComparisonClassification.NEWLY_INTRODUCED_FAILURE
+                for tc in matched_comparisons
+            )
+            has_failed_scenario_ev = any(
+                tc.modified_outcome == IndividualTestOutcome.FAILED
+                for tc in matched_comparisons
+            )
 
             if blocking_ambs or unresolved_ambs:
                 v_status = TraceabilityEvidenceStatus.NEEDS_CLARIFICATION
@@ -2985,38 +3564,61 @@ class OrchestratorService:
                     f"Mapped scenario(s) ({', '.join(gen_scn_ids)}) were not approved and executed."
                 )
                 note = "Approve and execute mapped scenarios before treating criterion as verified."
+            elif has_regressed_scenario:
+                v_status = TraceabilityEvidenceStatus.FAILED
+                regressed_ids = [
+                    tc.scenario_id
+                    for tc in matched_comparisons
+                    if tc.classification == TestComparisonClassification.NEWLY_INTRODUCED_FAILURE
+                    and tc.scenario_id
+                ]
+                ev_summary = (
+                    f"Confirmed newly introduced regression on mapped scenario(s) ({', '.join(regressed_ids)}): "
+                    "passed on baseline and failed on modified snapshot."
+                )
+                note = "Newly introduced regression blocks ordinary approval."
             elif verification.verification_passed and outcome == VerificationOutcome.PASSED:
                 v_status = TraceabilityEvidenceStatus.VERIFIED
+                cls_summary = (
+                    ", ".join(
+                        f"{tc.scenario_id}:{tc.classification.value}"
+                        for tc in matched_comparisons
+                        if tc.scenario_id
+                    )
+                    if matched_comparisons
+                    else "modified_only"
+                )
                 ev_summary = (
                     f"Explicitly mapped scenario(s) ({', '.join(exe_scn_ids)}) approved and "
-                    f"executed with passing pytest outcome (passed={verification.passed}, failed=0)."
+                    f"executed with passing modified pytest outcome (passed={verification.passed}, failed=0; "
+                    f"baseline comparison: {cls_summary})."
                 )
                 note = (
-                    "Verified against modified working copy only; baseline regression comparison "
-                    f"status is '{verification.baseline_comparison.status}'."
+                    f"Baseline-versus-modified comparison status is '{comparison.status.value}'."
                 )
             elif outcome == VerificationOutcome.FAILED_TESTS:
-                matched_failure = False
-                for sid in exe_scn_ids:
-                    exp_path = exported_files.get(sid)
-                    if exp_path and any(
-                        exp_path in tname or Path(exp_path).name in tname
-                        for tname in failure_test_names
-                    ):
-                        matched_failure = True
-                        break
+                matched_failure = has_failed_scenario_ev
+                if not matched_failure:
+                    for sid in exe_scn_ids:
+                        exp_path = exported_files.get(sid)
+                        if exp_path and any(
+                            exp_path in tname or Path(exp_path).name in tname
+                            for tname in failure_test_names
+                        ):
+                            matched_failure = True
+                            break
                 if matched_failure or has_unattributable_failure or not failure_test_names:
                     v_status = TraceabilityEvidenceStatus.FAILED
                     ev_summary = (
                         f"Mapped scenario(s) ({', '.join(exe_scn_ids)}) failed during M04 "
                         f"verification (outcome='{outcome.value}')."
                     )
-                    note = "Inspect M04 failure diagnostics for failing assertions."
+                    note = "Inspect M04 failure diagnostics and baseline comparison evidence."
                 else:
                     v_status = TraceabilityEvidenceStatus.UNVERIFIED
                     ev_summary = (
-                        f"Overall verification failed on another scenario; per-file pass confirmation "
-                        f"for ({', '.join(exe_scn_ids)}) is unavailable from aggregate M04 parser output."
+                        f"Overall verification failed on another scenario; criterion remains unverified "
+                        "while the modified verification suite contains failing tests."
                     )
                     note = "Cannot mark verified while verification run exited with failures."
             else:
@@ -3080,7 +3682,9 @@ class OrchestratorService:
         req_verification_proven = bool(
             mandatory_coverage_complete
             and verification.verification_passed
-            and verification.baseline_comparison.status == "completed"
+            and comparison.status == VerificationComparisonStatus.COMPLETED
+            and comparison.summary.regression_safety_established
+            and not comparison.summary.has_confirmed_regression
             and not req_analysis.is_deterministic_fixture
             and (gen is None or not gen.is_mock_output)
             and (
@@ -3120,9 +3724,16 @@ class OrchestratorService:
             unverified_reqs.append(
                 f"Approved scenario(s) did not achieve passing verification (outcome='{outcome.value}')."
             )
-        if verification.baseline_comparison.status != "completed":
+        if comparison.summary.has_confirmed_regression:
             unverified_reqs.append(
-                "Baseline-versus-modified regression comparison was not executed; regression safety against baseline is unverified."
+                "Confirmed newly introduced regression(s) detected against baseline: "
+                + ", ".join(comparison.summary.newly_introduced_failures)
+                + "."
+            )
+        elif comparison.status != VerificationComparisonStatus.COMPLETED:
+            unverified_reqs.append(
+                f"Baseline-versus-modified regression comparison status is '{comparison.status.value}'; "
+                "complete regression safety against baseline is not established."
             )
 
         traceability_dict = {
@@ -3147,7 +3758,11 @@ class OrchestratorService:
             "has_mandatory_unresolved_ambiguities": req_analysis.has_mandatory_unresolved_ambiguities,
             "mandatory_criteria_coverage_complete": mandatory_coverage_complete,
             "requirement_verification_proven": req_verification_proven,
-            "baseline_regression_comparison_status": verification.baseline_comparison.status,
+            "complete_requirement_assurance": req_verification_proven,
+            "baseline_regression_comparison_status": comparison.status.value,
+            "regression_safety_established": comparison.summary.regression_safety_established,
+            "has_confirmed_regression": comparison.summary.has_confirmed_regression,
+            "newly_introduced_failure_count": comparison.summary.newly_introduced_failure_count,
             "total_criteria_count": len(entries),
             "mandatory_criteria_count": len(mandatory_ids),
             "verified_criterion_ids": verified_ids,
@@ -3202,8 +3817,20 @@ class OrchestratorService:
         has_blocking_ambiguity = bool(
             req_analysis is not None and req_analysis.has_mandatory_unresolved_ambiguities
         )
+        comparison = verification.baseline_comparison
+        has_confirmed_regression = comparison.summary.blocks_ordinary_approval
+        complete_assurance = bool(traceability.get("requirement_verification_proven", False))
         outcome = verification.verification_outcome
-        if verification.verification_passed and outcome == VerificationOutcome.PASSED:
+
+        if has_confirmed_regression:
+            recommendation = "reject"
+            recommendation_label = "verification_failed"
+            recommendation_summary = (
+                "Confirmed newly introduced regression(s) detected against baseline "
+                f"({', '.join(comparison.summary.newly_introduced_failures)}). "
+                "Ordinary approval is blocked; inspect baseline-vs-modified comparison and failure diagnostics."
+            )
+        elif verification.verification_passed and outcome == VerificationOutcome.PASSED:
             recommendation = "needs_review"
             if has_blocking_ambiguity:
                 recommendation_label = "additional_review_required"
@@ -3220,10 +3847,27 @@ class OrchestratorService:
                     if gen is not None and gen.is_mock_output
                     else ""
                 )
+                comparison_clause = (
+                    f" Baseline-vs-modified comparison completed with 0 confirmed regressions "
+                    f"({comparison.summary.preserved_behavior_count} preserved, "
+                    f"{comparison.summary.newly_satisfied_acceptance_count} newly satisfied acceptance)."
+                    if comparison.status == VerificationComparisonStatus.COMPLETED
+                    else (
+                        f" Baseline-vs-modified comparison status is '{comparison.status.value}'; "
+                        "complete regression safety is not established."
+                    )
+                )
+                assurance_clause = (
+                    " Ordinary human approval records review of this evidence package but does not "
+                    "constitute complete requirement assurance."
+                    if not complete_assurance
+                    else ""
+                )
                 recommendation_summary = (
                     "All approved generated tests passed against the modified working copy. "
                     "Ready for human review; passing generated tests alone is not proof of "
-                    f"full requirement verification, regression safety, or production readiness.{mock_clause}"
+                    f"full requirement verification, regression safety, or production readiness."
+                    f"{comparison_clause}{assurance_clause}{mock_clause}"
                 )
         elif outcome == VerificationOutcome.FAILED_TESTS:
             recommendation = "reject"
@@ -3251,10 +3895,23 @@ class OrchestratorService:
             recommendation_summary = "Additional human review is required."
 
         limitations: list[str] = [
-            "Baseline-versus-modified regression comparison was not executed; passing generated tests on the modified working copy alone does not guarantee complete regression safety.",
-            "Git workspace isolation copies files into a run-specific directory and is not an operating-system security sandbox.",
+            "Git workspace isolation copies files into run-specific directories and is not an operating-system security sandbox.",
             "Reviewer identity labels are unauthenticated local MVP inputs and do not constitute cryptographic or SSO identity proof.",
         ]
+        if comparison.status == VerificationComparisonStatus.COMPLETED:
+            limitations.append(
+                "Baseline-versus-modified comparison reflects only the executed approved scenarios "
+                "and any discovered pre-existing regression tests; M04 report_parser omits individual "
+                "passed pytest node IDs."
+            )
+        else:
+            limitations.append(
+                f"Baseline-versus-modified regression comparison is '{comparison.status.value}'; "
+                "passing generated tests on the modified working copy alone does not guarantee complete regression safety."
+            )
+        for comp_lim in comparison.evidence_limitations:
+            if comp_lim not in limitations:
+                limitations.append(comp_lim)
         if run.workflow_mode == WorkflowMode.GENERATE_AND_VERIFY_CHANGE:
             limitations.append(
                 "Pre-change M01 codebase context was limited to static AST indexing; full reverse-dependency impact analysis ran post-patch."
@@ -3344,6 +4001,7 @@ class OrchestratorService:
                 else None
             ),
             original_source_snapshot_sha256=run.original_source_snapshot_sha256,
+            baseline_source_snapshot_sha256=run.baseline_source_snapshot_sha256,
             resulting_source_snapshot_sha256=run.source_snapshot_sha256,
             changed_files=changed_files,
             impacted_modules=impacted_modules,
@@ -3353,7 +4011,11 @@ class OrchestratorService:
             codebase_analysis=cb,
             test_generation=gen,
             verification=verification,
+            baseline_verification=run.baseline_verification,
+            modified_verification=run.modified_verification,
+            baseline_comparison=comparison,
             risk_summary=verification.risk_summary if verification else RiskSummary(),
+            complete_requirement_assurance=complete_assurance,
             recommendation=recommendation,
             recommendation_label=recommendation_label,
             recommendation_summary=recommendation_summary,
@@ -3391,18 +4053,55 @@ class OrchestratorService:
             )
 
         if request.decision == HumanDecision.APPROVE:
+            active_comparison = (
+                run.baseline_comparison
+                or (run.verification.baseline_comparison if run.verification is not None else None)
+            )
             if run.verification is None or not run.verification.verification_passed:
                 outcome_val = (
                     run.verification.verification_outcome.value
                     if run.verification is not None
                     else "missing"
                 )
+                details: dict[str, Any] = {"verification_outcome": outcome_val}
+                reg_clause = ""
+                if (
+                    active_comparison is not None
+                    and active_comparison.summary.has_confirmed_regression
+                ):
+                    details["has_confirmed_regression"] = True
+                    details["newly_introduced_failures"] = list(
+                        active_comparison.summary.newly_introduced_failures
+                    )
+                    reg_clause = (
+                        " Confirmed newly introduced regression(s): "
+                        + ", ".join(active_comparison.summary.newly_introduced_failures)
+                        + "."
+                    )
                 raise ReviewConflictError(
                     "Cannot approve a change package when mandatory verification did not pass "
-                    f"(verification_outcome='{outcome_val}'). "
+                    f"(verification_outcome='{outcome_val}').{reg_clause} "
                     "Submit 'needs_review' or 'reject' instead.",
                     code="VERIFICATION_APPROVAL_BLOCKED",
-                    details={"verification_outcome": outcome_val},
+                    details=details,
+                    run_id=run_id,
+                )
+            if (
+                active_comparison is not None
+                and active_comparison.summary.blocks_ordinary_approval
+            ):
+                raise ReviewConflictError(
+                    "Cannot approve a change package when baseline-versus-modified comparison "
+                    "confirmed newly introduced mandatory regression(s) "
+                    f"({', '.join(active_comparison.summary.newly_introduced_failures)}). "
+                    "Submit 'needs_review' or 'reject' instead.",
+                    code="REGRESSION_APPROVAL_BLOCKED",
+                    details={
+                        "newly_introduced_failures": list(
+                            active_comparison.summary.newly_introduced_failures
+                        ),
+                        "comparison_status": active_comparison.status.value,
+                    },
                     run_id=run_id,
                 )
             if (

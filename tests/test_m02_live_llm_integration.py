@@ -350,7 +350,8 @@ def test_real_groq_adapter_sdk_wiring_and_live_evidence_integrity(
         assert gate2_ok["report"]["is_mock_output"] is False
         assert gate2_ok["report"]["model_label"] == f"groq:{configured_model}"
         assert gate2_ok["report"]["traceability"]["requirement_verification_proven"] is False
-        assert gate2_ok["verification"]["baseline_comparison"]["status"] == "unavailable"
+        assert gate2_ok["verification"]["baseline_comparison"]["status"] == "completed"
+        assert gate2_ok["verification"]["baseline_comparison"]["summary"]["has_confirmed_regression"] is False
 
         # Scenario B (Regressive) -> ordinary final approval blocked with HTTP 409
         gate1_bad = _run_live_and_wait(client, app, repo_id="pos-bad")

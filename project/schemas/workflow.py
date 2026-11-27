@@ -23,8 +23,11 @@ from .agents import (
     AgentError,
     AgentExecutionRecord,
     AgentExecutionStatus,
+    BaselineComparisonEvidence,
+    BaselineVerificationResult,
     ChangePackageReport,
     CodebaseAnalysisResult,
+    ModifiedVerificationResult,
     TestGenerationResult,
     VerificationResult,
     utc_now,
@@ -56,6 +59,10 @@ class WorkflowState(str, Enum):
     ANALYZING_POST_PATCH_IMPACT = "ANALYZING_POST_PATCH_IMPACT"
     GENERATING_TESTS = "GENERATING_TESTS"
     AWAITING_TEST_REVIEW = "AWAITING_TEST_REVIEW"
+    PREPARING_BASELINE = "PREPARING_BASELINE"
+    RUNNING_BASELINE_VERIFICATION = "RUNNING_BASELINE_VERIFICATION"
+    RUNNING_MODIFIED_VERIFICATION = "RUNNING_MODIFIED_VERIFICATION"
+    COMPARING_VERIFICATION_RESULTS = "COMPARING_VERIFICATION_RESULTS"
     RUNNING_VERIFICATION = "RUNNING_VERIFICATION"
     COMPILING_REPORT = "COMPILING_REPORT"
     AWAITING_FINAL_APPROVAL = "AWAITING_FINAL_APPROVAL"
@@ -308,6 +315,11 @@ class WorkflowRunRecord(BaseModel):
     repository: RepositoryInfo
     workspace_id: str | None = None
     workspace_path: str | None = None
+    baseline_workspace_id: str | None = None
+    baseline_workspace_path: str | None = None
+    baseline_source_snapshot_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     original_source_snapshot_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -330,6 +342,9 @@ class WorkflowRunRecord(BaseModel):
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     test_review: TestReviewRecord | None = None
+    baseline_verification: BaselineVerificationResult | None = None
+    modified_verification: ModifiedVerificationResult | None = None
+    baseline_comparison: BaselineComparisonEvidence | None = None
     verification: VerificationResult | None = None
     report: ChangePackageReport | None = None
     final_decision: HumanDecisionRecord | None = None

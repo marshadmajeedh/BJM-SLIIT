@@ -6,6 +6,15 @@ from .adapters import (
     PatchGenerationAdapter,
     PatchGeneratorProvider,
 )
+from .baseline_verification import (
+    BaselineComparisonEngine,
+    BaselineTestMirrorError,
+    build_test_evidence_from_aggregate_result,
+    discover_existing_regression_tests,
+    execute_snapshot_verification,
+    mirror_approved_tests_to_baseline,
+    resolve_scenario_test_purpose,
+)
 from .config import OrchestratorConfig
 from .orchestrator import (
     ACTIVE_EXECUTION_STATES,
@@ -46,6 +55,8 @@ from .workspace import (
 __all__ = [
     "ACTIVE_EXECUTION_STATES",
     "ALLOWED_TRANSITIONS",
+    "BaselineComparisonEngine",
+    "BaselineTestMirrorError",
     "DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL",
     "DEFAULT_OFFLINE_REQUIREMENT_LABEL",
     "DeterministicPremiumDiscountPatchFixture",
@@ -73,13 +84,18 @@ __all__ = [
     "WorkspaceManager",
     "WorkspaceSecurityError",
     "build_requirement_analysis_prompt",
+    "build_test_evidence_from_aggregate_result",
     "compute_git_diff_sha256",
     "compute_source_snapshot_sha256",
     "default_offline_model_stub",
     "deterministic_offline_requirement_analyzer",
+    "discover_existing_regression_tests",
+    "execute_snapshot_verification",
     "format_requirements_for_downstream",
     "generate_log_id",
     "generate_run_id",
+    "mirror_approved_tests_to_baseline",
     "redact_secrets",
+    "resolve_scenario_test_purpose",
     "validate_transition",
 ]

@@ -713,12 +713,7 @@
       "BaselineComparisonEvidence": {
         "properties": {
           "status": {
-            "type": "string",
-            "enum": [
-              "unavailable",
-              "completed"
-            ],
-            "title": "Status",
+            "$ref": "#/components/schemas/VerificationComparisonStatus",
             "default": "unavailable"
           },
           "baseline_ref": {
@@ -731,6 +726,46 @@
               }
             ],
             "title": "Baseline Ref"
+          },
+          "baseline_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Commit"
+          },
+          "baseline_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Source Snapshot Sha256"
+          },
+          "modified_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified Source Snapshot Sha256"
+          },
+          "approved_test_hashes_verified": {
+            "type": "boolean",
+            "title": "Approved Test Hashes Verified",
+            "default": false
           },
           "baseline_passed": {
             "anyOf": [
@@ -794,6 +829,43 @@
             ],
             "title": "Newly Failing Tests"
           },
+          "baseline_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modified_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModifiedVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "test_comparisons": {
+            "items": {
+              "$ref": "#/components/schemas/TestComparisonResult"
+            },
+            "type": "array",
+            "title": "Test Comparisons"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RegressionComparisonSummary"
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          },
           "notes": {
             "type": "string",
             "title": "Notes",
@@ -803,7 +875,203 @@
         "additionalProperties": false,
         "type": "object",
         "title": "BaselineComparisonEvidence",
-        "description": "Placeholder interface for future baseline-versus-modified regression runs."
+        "description": "Baseline-versus-modified verification evidence and deterministic comparison.\n\nPreserves all pre-P0-7 fields (``status``, ``baseline_ref``,\n``baseline_passed``, ``baseline_failed``, ``modified_passed``,\n``modified_failed``, ``newly_failing_tests``, ``notes``) for backward\ncompatibility with previously persisted records while adding itemized\nper-test comparison results, snapshot/test SHA-256 provenance, and\nexplicit limitation disclosures."
+      },
+      "BaselineVerificationResult": {
+        "properties": {
+          "snapshot_role": {
+            "type": "string",
+            "const": "baseline",
+            "title": "Snapshot Role",
+            "default": "baseline"
+          },
+          "execution_status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "timeout",
+              "error",
+              "not_executed",
+              "unavailable"
+            ],
+            "title": "Execution Status",
+            "default": "unavailable"
+          },
+          "verification_outcome": {
+            "$ref": "#/components/schemas/VerificationOutcome",
+            "default": "unavailable"
+          },
+          "baseline_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Ref"
+          },
+          "baseline_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Commit"
+          },
+          "source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Snapshot Sha256"
+          },
+          "approved_test_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approved Test Hashes"
+          },
+          "executed_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Ids"
+          },
+          "executed_test_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Paths"
+          },
+          "suite_kind": {
+            "$ref": "#/components/schemas/TestSuiteKind",
+            "default": "generated_acceptance"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "total_tests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tests"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "collection_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Collection Errors"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/FailureDiagnostic"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "test_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/TestExecutionEvidence"
+            },
+            "type": "array",
+            "title": "Test Evidence"
+          },
+          "existing_regression_suite": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SuiteExecutionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BaselineVerificationResult",
+        "description": "Verification execution evidence captured against the resolved baseline Git commit."
       },
       "BusinessConstraint": {
         "properties": {
@@ -1016,6 +1284,17 @@
             ],
             "title": "Original Source Snapshot Sha256"
           },
+          "baseline_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Source Snapshot Sha256"
+          },
           "resulting_source_snapshot_sha256": {
             "anyOf": [
               {
@@ -1065,8 +1344,43 @@
               }
             ]
           },
+          "baseline_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modified_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModifiedVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseline_comparison": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineComparisonEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "risk_summary": {
             "$ref": "#/components/schemas/RiskSummary"
+          },
+          "complete_requirement_assurance": {
+            "type": "boolean",
+            "title": "Complete Requirement Assurance",
+            "default": false
           },
           "recommendation": {
             "type": "string",
@@ -1609,6 +1923,10 @@
             },
             "type": "array",
             "title": "Criterion Ids"
+          },
+          "test_purpose": {
+            "$ref": "#/components/schemas/TestPurpose",
+            "default": "unknown"
           }
         },
         "additionalProperties": false,
@@ -1884,6 +2202,213 @@
         ],
         "title": "ImpactedFile",
         "description": "Normalized downstream module impacted by a changed Python file."
+      },
+      "IndividualTestOutcome": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "failed",
+          "skipped",
+          "collection_error",
+          "timeout",
+          "execution_error",
+          "not_executed",
+          "unavailable",
+          "unknown"
+        ],
+        "title": "IndividualTestOutcome",
+        "description": "Observed execution outcome for an individual test or scenario unit."
+      },
+      "ModifiedVerificationResult": {
+        "properties": {
+          "snapshot_role": {
+            "type": "string",
+            "const": "modified",
+            "title": "Snapshot Role",
+            "default": "modified"
+          },
+          "execution_status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "timeout",
+              "error",
+              "not_executed",
+              "unavailable"
+            ],
+            "title": "Execution Status",
+            "default": "unavailable"
+          },
+          "verification_outcome": {
+            "$ref": "#/components/schemas/VerificationOutcome",
+            "default": "unavailable"
+          },
+          "verification_passed": {
+            "type": "boolean",
+            "title": "Verification Passed",
+            "default": false
+          },
+          "source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Snapshot Sha256"
+          },
+          "git_diff_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Diff Sha256"
+          },
+          "approved_test_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approved Test Hashes"
+          },
+          "executed_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Ids"
+          },
+          "executed_test_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Paths"
+          },
+          "suite_kind": {
+            "$ref": "#/components/schemas/TestSuiteKind",
+            "default": "generated_acceptance"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "total_tests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tests"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "collection_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Collection Errors"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/FailureDiagnostic"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "test_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/TestExecutionEvidence"
+            },
+            "type": "array",
+            "title": "Test Evidence"
+          },
+          "existing_regression_suite": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SuiteExecutionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ModifiedVerificationResult",
+        "description": "Verification execution evidence captured against the modified workspace snapshot."
       },
       "PatchApplicationResponse": {
         "properties": {
@@ -2498,6 +3023,165 @@
         "title": "PreChangeFileSummary",
         "description": "Static AST summary of a single indexed Python file before patch generation."
       },
+      "RegressionComparisonSummary": {
+        "properties": {
+          "comparison_status": {
+            "$ref": "#/components/schemas/VerificationComparisonStatus",
+            "default": "unavailable"
+          },
+          "total_compared": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Compared",
+            "default": 0
+          },
+          "comparable_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Comparable Count",
+            "default": 0
+          },
+          "preserved_behavior_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Preserved Behavior Count",
+            "default": 0
+          },
+          "newly_introduced_failure_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Newly Introduced Failure Count",
+            "default": 0
+          },
+          "newly_satisfied_acceptance_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Newly Satisfied Acceptance Count",
+            "default": 0
+          },
+          "fixed_existing_failure_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Fixed Existing Failure Count",
+            "default": 0
+          },
+          "fail_to_pass_unclassified_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Fail To Pass Unclassified Count",
+            "default": 0
+          },
+          "persistent_failure_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Persistent Failure Count",
+            "default": 0
+          },
+          "not_comparable_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Not Comparable Count",
+            "default": 0
+          },
+          "unknown_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unknown Count",
+            "default": 0
+          },
+          "unavailable_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unavailable Count",
+            "default": 0
+          },
+          "has_confirmed_regression": {
+            "type": "boolean",
+            "title": "Has Confirmed Regression",
+            "default": false
+          },
+          "blocks_ordinary_approval": {
+            "type": "boolean",
+            "title": "Blocks Ordinary Approval",
+            "default": false
+          },
+          "regression_safety_established": {
+            "type": "boolean",
+            "title": "Regression Safety Established",
+            "default": false
+          },
+          "newly_introduced_failures": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Newly Introduced Failures"
+          },
+          "preserved_behaviors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preserved Behaviors"
+          },
+          "newly_satisfied_acceptance_criteria": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Newly Satisfied Acceptance Criteria"
+          },
+          "fixed_existing_failures": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Fixed Existing Failures"
+          },
+          "fail_to_pass_unclassified": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Fail To Pass Unclassified"
+          },
+          "persistent_failures": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Persistent Failures"
+          },
+          "unavailable_or_incomparable": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unavailable Or Incomparable"
+          },
+          "generated_suite_aggregate": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Generated Suite Aggregate"
+          },
+          "existing_regression_suite_aggregate": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Existing Regression Suite Aggregate"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RegressionComparisonSummary",
+        "description": "Aggregate summary of deterministic baseline-vs-modified comparison outcomes."
+      },
       "RepositorySummaryResponse": {
         "properties": {
           "repository_id": {
@@ -2982,6 +3666,17 @@
             ],
             "title": "Original Git Diff Sha256"
           },
+          "baseline_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Source Snapshot Sha256"
+          },
           "source_snapshot_sha256": {
             "anyOf": [
               {
@@ -3124,6 +3819,36 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/TestReviewRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseline_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modified_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModifiedVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseline_comparison": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineComparisonEvidence"
               },
               {
                 "type": "null"
@@ -3352,6 +4077,21 @@
             ],
             "title": "Verification Passed"
           },
+          "baseline_comparison_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationComparisonStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_confirmed_regression": {
+            "type": "boolean",
+            "title": "Has Confirmed Regression",
+            "default": false
+          },
           "has_error": {
             "type": "boolean",
             "title": "Has Error",
@@ -3371,6 +4111,491 @@
         ],
         "title": "RunSummaryResponse",
         "description": "Compact workflow run summary returned in paginated run listings."
+      },
+      "SuiteExecutionSummary": {
+        "properties": {
+          "suite_kind": {
+            "$ref": "#/components/schemas/TestSuiteKind",
+            "default": "existing_regression"
+          },
+          "execution_status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "timeout",
+              "error",
+              "not_executed",
+              "unavailable"
+            ],
+            "title": "Execution Status",
+            "default": "unavailable"
+          },
+          "verification_outcome": {
+            "$ref": "#/components/schemas/VerificationOutcome",
+            "default": "unavailable"
+          },
+          "discovered_test_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Discovered Test Paths"
+          },
+          "test_file_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Test File Hashes"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "total_tests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tests"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "collection_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Collection Errors"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/components/schemas/FailureDiagnostic"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "test_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/TestExecutionEvidence"
+            },
+            "type": "array",
+            "title": "Test Evidence"
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SuiteExecutionSummary",
+        "description": "Execution summary for a separate existing repository regression test suite."
+      },
+      "TestComparisonClassification": {
+        "type": "string",
+        "enum": [
+          "preserved_behavior",
+          "newly_introduced_failure",
+          "newly_satisfied_acceptance_criterion",
+          "fixed_existing_failure",
+          "fail_to_pass_unclassified",
+          "persistent_failure",
+          "not_comparable",
+          "unknown",
+          "unavailable"
+        ],
+        "title": "TestComparisonClassification",
+        "description": "Deterministic classification of baseline-vs-modified execution comparison."
+      },
+      "TestComparisonResult": {
+        "properties": {
+          "test_identity": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Test Identity"
+          },
+          "scenario_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario Id"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "relative_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Path"
+          },
+          "suite_kind": {
+            "$ref": "#/components/schemas/TestSuiteKind",
+            "default": "generated_acceptance"
+          },
+          "test_purpose": {
+            "$ref": "#/components/schemas/TestPurpose",
+            "default": "unknown"
+          },
+          "criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Criterion Ids"
+          },
+          "approved_test_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Test Sha256"
+          },
+          "baseline_test_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Test Sha256"
+          },
+          "modified_test_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified Test Sha256"
+          },
+          "test_hashes_match": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Hashes Match"
+          },
+          "baseline_outcome": {
+            "$ref": "#/components/schemas/IndividualTestOutcome",
+            "default": "unavailable"
+          },
+          "modified_outcome": {
+            "$ref": "#/components/schemas/IndividualTestOutcome",
+            "default": "unavailable"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/TestComparisonClassification",
+            "default": "unavailable"
+          },
+          "is_mandatory_regression": {
+            "type": "boolean",
+            "title": "Is Mandatory Regression",
+            "default": false
+          },
+          "comparable": {
+            "type": "boolean",
+            "title": "Comparable",
+            "default": false
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Rationale",
+            "default": ""
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "test_identity"
+        ],
+        "title": "TestComparisonResult",
+        "description": "Deterministic baseline-vs-modified comparison outcome for a single test identity."
+      },
+      "TestExecutionEvidence": {
+        "properties": {
+          "test_identity": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Test Identity"
+          },
+          "scenario_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario Id"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "relative_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Path"
+          },
+          "suite_kind": {
+            "$ref": "#/components/schemas/TestSuiteKind",
+            "default": "generated_acceptance"
+          },
+          "test_purpose": {
+            "$ref": "#/components/schemas/TestPurpose",
+            "default": "unknown"
+          },
+          "criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Criterion Ids"
+          },
+          "test_source_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Source Sha256"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/IndividualTestOutcome",
+            "default": "unavailable"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "total_tests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tests"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passed"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "collection_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Collection Errors"
+          },
+          "failure_message": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Message"
+          },
+          "evidence_granularity": {
+            "type": "string",
+            "enum": [
+              "per_test_node",
+              "single_scenario_file",
+              "aggregate_only",
+              "unavailable"
+            ],
+            "title": "Evidence Granularity",
+            "default": "unavailable"
+          },
+          "evidence_limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Limitations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "test_identity"
+        ],
+        "title": "TestExecutionEvidence",
+        "description": "Structured execution evidence for a single stable test or scenario identity."
       },
       "TestGenerationResponse": {
         "properties": {
@@ -3466,6 +4691,17 @@
         "title": "TestGenerationResponse",
         "description": "Normalized M03 test generation view excluding raw model envelopes."
       },
+      "TestPurpose": {
+        "type": "string",
+        "enum": [
+          "new_requirement_acceptance",
+          "existing_behavior_preservation",
+          "existing_repository_regression",
+          "unknown"
+        ],
+        "title": "TestPurpose",
+        "description": "Explicit test intent; defaults to unknown rather than inventing intent."
+      },
       "TestReviewRecord": {
         "properties": {
           "approved": {
@@ -3548,6 +4784,15 @@
         "title": "TestReviewRequest",
         "description": "Human review decision for generated test proposals before verification."
       },
+      "TestSuiteKind": {
+        "type": "string",
+        "enum": [
+          "generated_acceptance",
+          "existing_regression"
+        ],
+        "title": "TestSuiteKind",
+        "description": "Distinguishes approved generated tests from existing repository test suites."
+      },
       "TraceabilityEvidenceStatus": {
         "type": "string",
         "enum": [
@@ -3598,6 +4843,16 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VerificationComparisonStatus": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "incomplete",
+          "unavailable"
+        ],
+        "title": "VerificationComparisonStatus",
+        "description": "Overall completeness status of a baseline-vs-modified verification comparison."
       },
       "VerificationOutcome": {
         "type": "string",
@@ -3821,6 +5076,10 @@
           "ANALYZING_POST_PATCH_IMPACT",
           "GENERATING_TESTS",
           "AWAITING_TEST_REVIEW",
+          "PREPARING_BASELINE",
+          "RUNNING_BASELINE_VERIFICATION",
+          "RUNNING_MODIFIED_VERIFICATION",
+          "COMPARING_VERIFICATION_RESULTS",
           "RUNNING_VERIFICATION",
           "COMPILING_REPORT",
           "AWAITING_FINAL_APPROVAL",
