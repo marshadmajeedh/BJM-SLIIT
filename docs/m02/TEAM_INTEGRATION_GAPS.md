@@ -18,6 +18,7 @@ Direct inspection of the current merged repository (`5e391d3`, including PR #20 
 | M02 baseline-vs-modified verification orchestration | **Resolved (PR #18):** `project/marsadh_orchestrator/baseline_verification.py` & `project/schemas/verification.py`. |
 | M02 bounded automated patch repair orchestration | **Resolved (PR #19):** `project/marsadh_orchestrator/repair_engine.py` & `project/schemas/repair.py`. |
 | M02 independent review integration & evidence reconciliation | **Resolved (PR #21):** `project/marsadh_orchestrator/adapters/review_adapter.py`, `review_reconciliation.py`, `project/schemas/review.py`. |
+| **GAP-04:** M02 `CodebaseAdapter.collect_pre_change_context` M01 AST dict-schema drift & stale absolute-only assumption | **Resolved (`fix/m02-codebase-adapter-m01-ast-schema`):** `project/marsadh_orchestrator/adapters/codebase_adapter.py` normalizes both current M01 structured AST dicts (`functions`, `classes`, `imports` with `line`/`end_line`/`kind`/`level`) and legacy string entries into `PreChangeFileSummary` (`functions`, `classes`, `imports`, plus `function_metadata`, `class_metadata`, `import_metadata`, `metadata_warnings` in `project/schemas/patch.py`), updates `CodebaseAdapter.analyze()`'s assumption string to reflect M01 static absolute+relative import resolution, and enforces secret redaction across adapter, `RunStore`, and API DTOs. Verified via real M01 `analyze_repository` on `sample_projects/mini_pos` and controlled package fixtures (`tests/test_m02_adapters.py`, `tests/test_m02_patch_generation_integration.py`). |
 
 ---
 
@@ -38,7 +39,7 @@ Priority scale:
 - **Why It Matters:** Without production A4, ChangeGuard AI cannot generate or repair code changes from a clean repository in `live_llm` mode (`PATCH_GENERATOR_UNAVAILABLE`), reducing the live demo to `verify_existing_change` only.
 - **Actual Source-Level Evidence:** `project/marsadh_orchestrator/adapters/patch_adapter.py` contains only the `PatchGeneratorProvider` Protocol, `PatchGenerationAdapter`, and deterministic test fixtures (`DeterministicPremiumDiscountPatchFixture`, etc.); `project/main.py` defaults `patch_production_provider=None`.
 - **Required Implementation Contract:** Implement `PatchGeneratorProvider` per `docs/m02/AGENT_INTEGRATION_CONTRACTS.md` Section 3 (unified Git diff, matching `patch_sha256`, allowed scope, valid A1 `related_criterion_ids`, replacement diffs against original snapshot on repair, honest `PatchModelMetadata`, `token_usage`, fail-closed auth/rate-limit handling) and inject via `create_app(..., patch_production_provider=...)`.
-- **Dependencies:** `GAP-04` (M02 `CodebaseAdapter` AST symbol fix so A4 receives populated `PreChangeFileSummary` functions/classes/imports); optional `GAP-06` (M01 pre-change impact prediction).
+- **Dependencies:** `GAP-04` (**resolved** on `fix/m02-codebase-adapter-m01-ast-schema` — A4 now receives populated `PreChangeFileSummary` symbols and structured metadata); optional `GAP-12` (M01 pre-change impact prediction).
 - **Acceptance Conditions:**
   1. `GET /health` reports `patch_generator_configured: true`.
   2. Mocked-LLM unit tests pass in CI covering initial generation, repair attempt 2 with failure diagnostics, invalid-diff/auth-error handling, and `token_usage`.
@@ -81,20 +82,20 @@ Priority scale:
 
 ---
 
-### GAP-04 — M02 `CodebaseAdapter.collect_pre_change_context` Schema Drift After M01 PR #20 (Confirmed Defect)
+### GAP-04 — M02 `CodebaseAdapter.collect_pre_change_context` Schema Drift After M01 PR #20 — **RESOLVED**
 
-- **Priority:** `P0` | **Prevents Complete Demo:** **No** *(degrades A4 context quality severely)*
+- **Status:** **RESOLVED** on branch `fix/m02-codebase-adapter-m01-ast-schema`
+- **Priority:** `P0` *(resolved)* | **Prevents Complete Demo:** **No**
 - **Responsible Member:** **Marsadh** (M02)
-- **Exact Missing Capability:** `CodebaseAdapter.collect_pre_change_context()` fails to extract function, class, and import names from M01's upgraded `analyzer.py` output (`list[dict]` instead of `list[str]`), returning `functions=[]`, `classes=[]`, `imports=[]` for every indexed file. Additionally, `CodebaseAdapter.analyze()` line 415 still emits a stale assumption claiming M01 supports absolute imports only.
-- **Why It Matters:** When A4 runs in `generate_and_verify_change` mode, `PreChangeCodebaseContext.indexed_files` loses all AST symbol summaries, depriving A4 of function/class/import metadata.
-- **Actual Source-Level Evidence:**
-  - `project/agents/mujahidh_codebase/analyzer.py:18-37, 70-84` returns dicts (`{"name": ..., "line": ...}`).
-  - `project/marsadh_orchestrator/adapters/codebase_adapter.py:625-627` checks `if isinstance(fn, str)`.
-  - Verified live via Python execution: `collect_pre_change_context('.', 'sample_projects/mini_pos', 'HEAD')` returned `functions= [] classes= [] imports= []` for `billing.py`, `customer_service.py`, `dashboard.py`.
-- **Required Implementation Contract:** Normalize both `dict` (`entry["name"]`) and legacy `str` entries in `codebase_adapter.py:625-627`, update the stale assumption text at `codebase_adapter.py:415` to reflect M01's current absolute+relative import support (while keeping dynamic-import caveat), and add a regression test in `tests/test_m02_patch_generation_integration.py`.
-- **Dependencies:** None.
-- **Acceptance Conditions:** `collect_pre_change_context('.', 'sample_projects/mini_pos', 'HEAD')` populates `functions=['calculate_total', 'apply_discount', 'checkout']` for `billing.py` and `imports=['billing']` for `refunds.py`; full pytest suite passes.
-- **Suggested Feature Branch:** `fix/m02-codebase-adapter-m01-ast-schema`
+- **Confirmed Root Cause:** M01 PR #20 (`da7526a`) upgraded `project/agents/mujahidh_codebase/analyzer.py` so `functions`, `classes`, and `imports` became lists of structured dicts (`{"name", "line", "end_line", "kind"}`, `{"name", "line", "end_line"}`, `{"name", "line", "kind", "level"}`), while `CodebaseAdapter.collect_pre_change_context()` filtered `if isinstance(fn, str)` and discarded all valid symbols to `[]`. Additionally, `CodebaseAdapter.analyze()` emitted a stale assumption string claiming M01 supported absolute imports only.
+- **Resolution Implemented:**
+  - Added typed structured AST metadata models (`PreChangeFunctionMetadata`, `PreChangeClassMetadata`, `PreChangeImportMetadata`) and backward-compatible fields (`function_metadata`, `class_metadata`, `import_metadata`, `metadata_warnings`) on `PreChangeFileSummary` (`project/schemas/patch.py`), exported in `project/schemas/__init__.py`, and synced `docs/m02/openapi.json`.
+  - Updated `project/marsadh_orchestrator/adapters/codebase_adapter.py` to normalize both current M01 structured dicts and legacy string formats (without fabricating missing metadata), preserve relative import representations (`.`, `.mod`, `..mod`) and `kind`/`level` metadata, record explicit `metadata_warnings`/`limitation_notes` for malformed entries while preserving valid sibling entries, redact secrets across adapter outputs and bounded sources, and update the stale `analyze()` assumption text to reflect M01's static absolute + relative import resolution.
+  - Extended `RunStore` (`project/marsadh_orchestrator/store.py`) and API projection (`project/api/schemas.py`) to sanitize `PreChangeCodebaseContext.indexed_files` and `PatchGenerationRequest.codebase_context`.
+- **Verification Evidence:**
+  - Direct execution of `CodebaseAdapter().collect_pre_change_context('.', 'sample_projects/mini_pos', 'HEAD')` populates `functions=['calculate_total', 'apply_discount', 'checkout']` + `function_metadata` for `billing.py`, `functions=['calculate_refund']` + `imports=['billing']` + `import_metadata` for `refunds.py`, and corresponding symbols/imports for `customer_service.py`, `dashboard.py`, and `reports.py`.
+  - Regression tests added and passing in `tests/test_m02_adapters.py` (`test_codebase_adapter_real_m01_structured_ast_classes_functions_and_relative_imports`, `test_codebase_adapter_legacy_mixed_malformed_and_secret_redacted_metadata`) and `tests/test_m02_patch_generation_integration.py` (`test_a4_receives_populated_mini_pos_ast_context_via_injectable_interface`, `test_a4_receives_classes_functions_absolute_and_relative_imports_with_redaction`, plus strengthened assertions in `test_clean_repo_generate_and_verify_end_to_end_offline_fixture_demo` and legacy `PreChangeFileSummary` deserialization).
+  - OpenAPI parity (`docs/m02/openapi.json` == `project.main:app.openapi()`), CI Ruff checks, `pip check`, and full pytest suite pass with zero failures.
 
 ---
 

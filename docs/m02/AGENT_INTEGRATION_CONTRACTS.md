@@ -76,11 +76,11 @@ The original submitted proposal (`docs/Proposal.docx`, Sections 5 and 10) define
 - **Output Schemas:**
   - Raw M01 `analyze_repository`: `{"repository": str, "files": [{"path": str, "functions": [{"name", "line", "end_line", "kind"}], "classes": [{"name", "line", "end_line"}], "imports": [{"name", "line", "kind", "level"}], "error"?: str}], "total_files": int, "errors": list[dict]}`.
   - Raw M01 `run_codebase_agent`: `{"agent": "CodebaseIntelligenceAgent", "repository": str, "source_path": str, "base_ref": str, "analysis_type": "static_code_change_impact", "status": "completed", "repository_summary": {"total_files": int, "analysis_errors": list}, "repository_analysis": dict, "reports": list[dict]}`.
-  - Normalized M02: `CodebaseAnalysisResult` (`status` in `{"completed", "no_changes", "error"}`, `file_impacts: list[ChangedFileImpact]`, `raw_report`, `raw_repository_analysis`) and `PreChangeCodebaseContext`.
+  - Normalized M02: `CodebaseAnalysisResult` (`status` in `{"completed", "no_changes", "error"}`, `file_impacts: list[ChangedFileImpact]`, `raw_report`, `raw_repository_analysis`) and `PreChangeCodebaseContext` (whose `indexed_files: list[PreChangeFileSummary]` preserves both flat symbol name lists `functions`/`classes`/`imports` — using leading-dot notation such as `.`, `.helper`, `..base` for relative imports — and structured `function_metadata`, `class_metadata`, `import_metadata`, plus explicit `metadata_warnings` for malformed entries).
 - **Execution Mode Support:** Deterministic static Python AST + Git CLI (runs identically in both `offline_test` and `live_llm` modes; no LLM calls).
-- **Error Handling:** M01 raises `ValueError` / `subprocess.CalledProcessError` / `subprocess.TimeoutExpired` and captures file parse errors inside `errors`. `CodebaseAdapter` catches all errors and returns structured `CodebaseAnalysisResult(status="error", error=AgentError(...))` or `PreChangeCodebaseContext(status="unavailable", error=AgentError(...))`.
+- **Error Handling:** M01 raises `ValueError` / `subprocess.CalledProcessError` / `subprocess.TimeoutExpired` and captures file parse errors inside `errors`. `CodebaseAdapter` catches all errors, redacts credential patterns, handles malformed AST entries explicitly via `metadata_warnings` and `limitation_notes` without discarding valid sibling symbols, and returns structured `CodebaseAnalysisResult(status="error", error=AgentError(...))` or `PreChangeCodebaseContext(status="unavailable", error=AgentError(...))`.
 - **Dependencies:** Python standard library (`ast`, `pathlib`, `re`, `subprocess`, `json`) + host `git` CLI.
-- **Current Integration Status:** Integrated and verified (offline + live-LLM pipeline). **Confirmed Defect Found in Audit:** PR #20 upgraded M01 `analyzer.py` so `functions`, `classes`, and `imports` are now `list[dict]` (`{"name": ..., "line": ...}`) instead of `list[str]`. `CodebaseAdapter.collect_pre_change_context` (`codebase_adapter.py:625-627`) still filters `if isinstance(fn, str)`, silently emitting `functions=[]`, `classes=[]`, `imports=[]` in `PreChangeFileSummary`!
+- **Current Integration Status:** **Implemented and verified** (post-change `analyze()` live-verified; pre-change `collect_pre_change_context()` **GAP-04 resolved** on `fix/m02-codebase-adapter-m01-ast-schema`). `CodebaseAdapter.collect_pre_change_context` now supports current M01 structured AST dicts (`name`, `line`, `end_line`, `kind`, `level`), preserves backward-compatible legacy string entries without fabricating metadata, captures relative imports (including `from . import ...` where `name=""` and `level>=1`), redacts secrets across adapter/store/API layers, and `CodebaseAdapter.analyze()` accurately reflects M01's static absolute + relative import support.
 - **Example Invocation:**
   ```python
   from project.marsadh_orchestrator.adapters import CodebaseAdapter
@@ -90,8 +90,7 @@ The original submitted proposal (`docs/Proposal.docx`, Sections 5 and 10) define
   impact = adapter.analyze(repo_path, source_path="mini_pos", base_ref="HEAD")
   pre_ctx, bounded_sources = adapter.collect_pre_change_context(repo_path, source_path="mini_pos", base_ref="HEAD")
   ```
-- **Required Contract Changes:**
-  1. **M02 focused fix (Marsadh):** Update `codebase_adapter.py:625-627` to extract `item["name"]` when M01 `analyzer.py` returns dicts (supporting both `dict` and `str` entries), and remove the stale `"resolves absolute Python imports only"` assumption string at `codebase_adapter.py:415`.
+- **Required Contract Changes:** None for GAP-04 (resolved and verified via `tests/test_m02_adapters.py` and `tests/test_m02_patch_generation_integration.py`). Remaining M01 enhancement is pre-change impact prediction (`GAP-12`).
 - **Assigned Owner:** **Mujahidh** (M01) + **Marsadh** (M02 `CodebaseAdapter`).
 
 ---
@@ -292,7 +291,7 @@ A plain callable `(PatchGenerationRequest) -> PatchGenerationResult | dict[str, 
 | `original_requirement` | Verbatim natural-language change request. |
 | `acceptance_criteria`, `business_constraints`, `unresolved_ambiguities` | Validated A1 structured records (`AcceptanceCriterion`, `BusinessConstraint`, `RequirementAmbiguity`). Blocking ambiguities are already blocked upstream by M02. |
 | `repository_snapshot_ref`, `base_ref`, `resolved_base_commit`, `source_snapshot_sha256`, `source_path` | Immutable original baseline snapshot identity. |
-| `codebase_context` | `PreChangeCodebaseContext` (static M01 AST file list; `pre_change_impact_prediction_available=False` until M01 adds pre-change prediction). |
+| `codebase_context` | `PreChangeCodebaseContext` (static M01 AST file list with populated `PreChangeFileSummary` `functions`/`classes`/`imports` and structured `function_metadata`/`class_metadata`/`import_metadata`/`metadata_warnings`; `pre_change_impact_prediction_available=False` until M01 adds pre-change prediction). |
 | `allowed_modification_paths` | Repo-relative path prefixes/files A4 is allowed to edit (must stay within `source_path`). |
 | `relevant_source_files`, `relevant_source_file_paths` | Bounded UTF-8 source contents (`dict[repo_rel_path, source_text]`, max 20 files / 32 KB per file / 128 KB total, sensitive files excluded). |
 | `attempt_number`, `attempt_type`, `repair_attempt_number` | Attempt `1` (`"initial"`, `repair_attempt_number=0`) or repair attempts `2` / `3` (`"repair"`, `repair_attempt_number=1` or `2`). Hard cap: max 2 repairs / 3 total proposals. |
