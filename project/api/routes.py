@@ -80,16 +80,22 @@ async def health_check(
     git_ok = shutil.which("git") is not None
     ver_deps_ok = _verification_deps_available()
     live_configured = bool(config.get_groq_api_key() and config.groq_model)
+    patch_gen_configured = bool(orchestrator.patch_adapter.is_production_configured)
 
     overall = "ok" if (db_ok and git_ok) else "degraded"
     limitations = [
         "Background workflow stages execute in a single-process bounded thread pool (not a durable distributed queue).",
         "Untrusted repository execution is disabled; pytest runs only inside server-trusted roots.",
+        "Git workspace isolation is not an operating-system security sandbox.",
         "Reviewer labels are local MVP metadata and do not represent authenticated user identities.",
     ]
     if not live_configured:
         limitations.append(
             "Live LLM mode is unconfigured (GROQ_API_KEY and GROQ_MODEL required); offline_test mode remains available."
+        )
+    if not patch_gen_configured:
+        limitations.append(
+            "Production A4 patch generation agent is not configured; generate_and_verify_change requires an injected PatchGeneratorProvider."
         )
 
     return HealthResponse(
@@ -99,6 +105,7 @@ async def health_check(
         database_available=db_ok,
         live_llm_configured=live_configured,
         groq_model=config.groq_model if live_configured else None,
+        patch_generator_configured=patch_gen_configured,
         verification_dependencies_available=ver_deps_ok,
         git_available=git_ok,
         configured_repository_ids=sorted(config.configured_repositories.keys()),
@@ -133,6 +140,7 @@ async def create_workflow_run(
     return CreateRunResponse(
         run_id=run.run_id,
         state=run.state,
+        workflow_mode=run.workflow_mode,
         execution_mode=run.execution_mode,
         created_at=run.created_at,
         message=(

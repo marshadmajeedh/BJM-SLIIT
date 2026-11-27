@@ -30,6 +30,13 @@ from project.schemas import (
     FailureDiagnostic,
     GeneratedTestScenario,
     HumanDecisionRecord,
+    PatchApplicationResult,
+    PatchFileChange,
+    PatchGenerationResult,
+    PatchModelMetadata,
+    PatchValidationResult,
+    PreChangeCodebaseContext,
+    PreChangeFileSummary,
     RequirementAmbiguity,
     RequirementAnalysisResult,
     RequirementAssumption,
@@ -39,6 +46,7 @@ from project.schemas import (
     TestReviewRecord,
     VerificationOutcome,
     VerificationResult,
+    WorkflowMode,
     WorkflowRunRecord,
     WorkflowState,
 )
@@ -67,6 +75,13 @@ class HealthResponse(BaseModel):
     database_available: bool
     live_llm_configured: bool
     groq_model: str | None = None
+    patch_generator_configured: bool = False
+    supported_workflow_modes: list[str] = Field(
+        default_factory=lambda: [
+            WorkflowMode.VERIFY_EXISTING_CHANGE.value,
+            WorkflowMode.GENERATE_AND_VERIFY_CHANGE.value,
+        ]
+    )
     verification_dependencies_available: bool
     git_available: bool
     configured_repository_ids: list[str] = Field(default_factory=list)
@@ -81,6 +96,7 @@ class CreateRunResponse(BaseModel):
 
     run_id: str
     state: WorkflowState
+    workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode
     created_at: datetime
     execution_model: str = "in_process_background_task"
@@ -120,6 +136,94 @@ class RequirementAnalysisResponse(BaseModel):
     has_mandatory_unresolved_ambiguities: bool = False
     error: AgentError | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class PreChangeContextResponse(BaseModel):
+    """Safe pre-change repository context summary excluding host paths and raw source code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "unavailable", "error"]
+    scope: Literal["static_repository_index_only", "unavailable"]
+    pre_change_impact_prediction_available: Literal[False] = False
+    source_path: str
+    base_ref: str
+    resolved_base_commit: str | None = None
+    total_indexed_files: int = 0
+    indexed_file_paths: list[str] = Field(default_factory=list)
+    indexed_files: list[PreChangeFileSummary] = Field(default_factory=list)
+    relevant_file_paths: list[str] = Field(default_factory=list)
+    limitation_notes: list[str] = Field(default_factory=list)
+    error: AgentError | None = None
+
+
+class PatchProposalResponse(BaseModel):
+    """Safe reviewable patch proposal view for dashboard inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str
+    patch_sha256: str
+    unified_diff: str
+    affected_files: list[PatchFileChange] = Field(default_factory=list)
+    change_rationale: str
+    related_criterion_ids: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    risk_indicators: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class PatchGenerationResponse(BaseModel):
+    """Sanitized A4 patch generation view with explicit fixture/mock indicators."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["proposed", "unavailable", "blocked", "error"]
+    attempt_number: int = 1
+    proposal: PatchProposalResponse | None = None
+    model_metadata: PatchModelMetadata
+    is_deterministic_fixture: bool = False
+    is_mock_output: bool = False
+    error: AgentError | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class PatchValidationResponse(BaseModel):
+    """Safe patch validation evidence view."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    valid: bool
+    status: Literal["passed", "failed"]
+    patch_sha256: str
+    expected_snapshot_sha256: str | None = None
+    checked_files: list[str] = Field(default_factory=list)
+    patch_size_bytes: int = 0
+    changed_file_count: int = 0
+    git_apply_check_passed: bool = False
+    checks_passed: list[str] = Field(default_factory=list)
+    violations: list[AgentError] = Field(default_factory=list)
+    validated_at: datetime
+
+
+class PatchApplicationResponse(BaseModel):
+    """Safe patch application evidence view preserving original and resulting snapshots."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    applied: bool
+    status: Literal["applied", "failed", "reverted"]
+    patch_sha256: str
+    original_source_snapshot_sha256: str
+    original_git_diff_sha256: str
+    resulting_source_snapshot_sha256: str | None = None
+    resulting_git_diff_sha256: str | None = None
+    applied_files: list[str] = Field(default_factory=list)
+    rollback_performed: bool = False
+    workspace_clean_after_rollback: bool | None = None
+    error: AgentError | None = None
+    applied_at: datetime
+    isolation_note: str
 
 
 class CodebaseAnalysisResponse(BaseModel):
@@ -207,9 +311,15 @@ class ChangePackageResponse(BaseModel):
     base_ref: str
     resolved_base_commit: str | None = None
     change_mode: str = "unknown"
+    workflow_mode: str = "verify_existing_change"
     execution_mode: str = "offline_test"
     model_label: str | None = None
     is_mock_output: bool | None = None
+    patch_proposal_sha256: str | None = None
+    patch_is_deterministic_fixture: bool | None = None
+    patch_applied: bool | None = None
+    original_source_snapshot_sha256: str | None = None
+    resulting_source_snapshot_sha256: str | None = None
     changed_files: list[str] = Field(default_factory=list)
     impacted_modules: list[str] = Field(default_factory=list)
     approved_scenario_ids: list[str] = Field(default_factory=list)
@@ -240,6 +350,7 @@ class RunSummaryResponse(BaseModel):
 
     run_id: str
     state: WorkflowState
+    workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode
     repository: RepositorySummaryResponse
     requirements_preview: str
@@ -247,6 +358,8 @@ class RunSummaryResponse(BaseModel):
     updated_at: datetime
     acceptance_criteria_count: int = 0
     has_unresolved_ambiguities: bool = False
+    patch_applied: bool | None = None
+    patch_attempt_number: int | None = None
     changed_file_count: int = 0
     proposed_scenario_count: int = 0
     verification_outcome: VerificationOutcome | None = None
@@ -273,16 +386,25 @@ class RunDetailResponse(BaseModel):
 
     run_id: str
     state: WorkflowState
+    workflow_mode: WorkflowMode = WorkflowMode.VERIFY_EXISTING_CHANGE
     execution_mode: ExecutionMode
     requirements: str
     repository: RepositorySummaryResponse
+    original_source_snapshot_sha256: str | None = None
+    original_git_diff_sha256: str | None = None
     source_snapshot_sha256: str | None = None
     git_diff_sha256: str | None = None
+    patch_proposal_sha256: str | None = None
+    patch_attempt_number: int | None = None
     created_at: datetime
     updated_at: datetime
     allowed_actions: list[str] = Field(default_factory=list)
     agent_records: list[AgentExecutionRecord] = Field(default_factory=list)
     requirement_analysis: RequirementAnalysisResponse | None = None
+    pre_change_context: PreChangeContextResponse | None = None
+    patch_generation: PatchGenerationResponse | None = None
+    patch_validation: PatchValidationResponse | None = None
+    patch_application: PatchApplicationResponse | None = None
     codebase_analysis: CodebaseAnalysisResponse | None = None
     test_generation: TestGenerationResponse | None = None
     test_review: TestReviewRecord | None = None
@@ -322,10 +444,15 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
             run.requirement_analysis is not None
             and run.requirement_analysis.has_mandatory_unresolved_ambiguities
         )
+        patch_ready = (
+            run.workflow_mode != WorkflowMode.GENERATE_AND_VERIFY_CHANGE
+            or (run.patch_application is not None and run.patch_application.applied)
+        )
         if (
             run.verification is not None
             and run.verification.verification_passed
             and not has_blocking_ambiguity
+            and patch_ready
         ):
             return [
                 "submit_final_decision:approve",
@@ -334,6 +461,103 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
             ]
         return ["submit_final_decision:reject", "submit_final_decision:needs_review"]
     return []
+
+
+def _to_pre_change_context_response(
+    ctx: PreChangeCodebaseContext | None,
+) -> PreChangeContextResponse | None:
+    if ctx is None:
+        return None
+    return PreChangeContextResponse(
+        status=ctx.status,
+        scope=ctx.scope,
+        pre_change_impact_prediction_available=ctx.pre_change_impact_prediction_available,
+        source_path=ctx.source_path,
+        base_ref=ctx.base_ref,
+        resolved_base_commit=ctx.resolved_base_commit,
+        total_indexed_files=ctx.total_indexed_files,
+        indexed_file_paths=list(ctx.indexed_file_paths),
+        indexed_files=list(ctx.indexed_files),
+        relevant_file_paths=list(ctx.relevant_file_paths),
+        limitation_notes=[redact_secrets(note) for note in ctx.limitation_notes],
+        error=_sanitize_error(ctx.error),
+    )
+
+
+def _to_patch_generation_response(
+    pg: PatchGenerationResult | None,
+) -> PatchGenerationResponse | None:
+    if pg is None:
+        return None
+    proposal_resp = None
+    if pg.proposal is not None:
+        proposal_resp = PatchProposalResponse(
+            proposal_id=pg.proposal.proposal_id,
+            patch_sha256=pg.proposal.patch_sha256,
+            unified_diff=redact_secrets(pg.proposal.unified_diff),
+            affected_files=list(pg.proposal.affected_files),
+            change_rationale=redact_secrets(pg.proposal.change_rationale),
+            related_criterion_ids=list(pg.proposal.related_criterion_ids),
+            assumptions=[redact_secrets(a) for a in pg.proposal.assumptions],
+            risk_indicators=[redact_secrets(r) for r in pg.proposal.risk_indicators],
+            notes=[redact_secrets(n) for n in pg.proposal.notes],
+        )
+    return PatchGenerationResponse(
+        status=pg.status,
+        attempt_number=pg.attempt_number,
+        proposal=proposal_resp,
+        model_metadata=pg.model_metadata,
+        is_deterministic_fixture=pg.is_deterministic_fixture,
+        is_mock_output=pg.is_mock_output,
+        error=_sanitize_error(pg.error),
+        notes=[redact_secrets(note) for note in pg.notes],
+    )
+
+
+def _to_patch_validation_response(
+    pv: PatchValidationResult | None,
+) -> PatchValidationResponse | None:
+    if pv is None:
+        return None
+    return PatchValidationResponse(
+        valid=pv.valid,
+        status=pv.status,
+        patch_sha256=pv.patch_sha256,
+        expected_snapshot_sha256=pv.expected_snapshot_sha256,
+        checked_files=list(pv.checked_files),
+        patch_size_bytes=pv.patch_size_bytes,
+        changed_file_count=pv.changed_file_count,
+        git_apply_check_passed=pv.git_apply_check_passed,
+        checks_passed=list(pv.checks_passed),
+        violations=[
+            sanitized
+            for v in pv.violations
+            if (sanitized := _sanitize_error(v)) is not None
+        ],
+        validated_at=pv.validated_at,
+    )
+
+
+def _to_patch_application_response(
+    pa: PatchApplicationResult | None,
+) -> PatchApplicationResponse | None:
+    if pa is None:
+        return None
+    return PatchApplicationResponse(
+        applied=pa.applied,
+        status=pa.status,
+        patch_sha256=pa.patch_sha256,
+        original_source_snapshot_sha256=pa.original_source_snapshot_sha256,
+        original_git_diff_sha256=pa.original_git_diff_sha256,
+        resulting_source_snapshot_sha256=pa.resulting_source_snapshot_sha256,
+        resulting_git_diff_sha256=pa.resulting_git_diff_sha256,
+        applied_files=list(pa.applied_files),
+        rollback_performed=pa.rollback_performed,
+        workspace_clean_after_rollback=pa.workspace_clean_after_rollback,
+        error=_sanitize_error(pa.error),
+        applied_at=pa.applied_at,
+        isolation_note=pa.isolation_note,
+    )
 
 
 def _to_requirement_analysis_response(
@@ -464,9 +688,15 @@ def _to_report_response(
         base_ref=report.base_ref,
         resolved_base_commit=report.resolved_base_commit,
         change_mode=report.change_mode,
+        workflow_mode=report.workflow_mode,
         execution_mode=report.execution_mode,
         model_label=report.model_label,
         is_mock_output=report.is_mock_output,
+        patch_proposal_sha256=report.patch_proposal_sha256,
+        patch_is_deterministic_fixture=report.patch_is_deterministic_fixture,
+        patch_applied=report.patch_applied,
+        original_source_snapshot_sha256=report.original_source_snapshot_sha256,
+        resulting_source_snapshot_sha256=report.resulting_source_snapshot_sha256,
         changed_files=list(report.changed_files),
         impacted_modules=list(report.impacted_modules),
         approved_scenario_ids=list(report.approved_scenario_ids),
@@ -497,6 +727,7 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
     return RunSummaryResponse(
         run_id=run.run_id,
         state=run.state,
+        workflow_mode=run.workflow_mode,
         execution_mode=run.execution_mode,
         repository=RepositorySummaryResponse(
             repository_id=run.repository.repository_id,
@@ -521,6 +752,10 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
             if run.requirement_analysis
             else False
         ),
+        patch_applied=(
+            run.patch_application.applied if run.patch_application is not None else None
+        ),
+        patch_attempt_number=run.patch_attempt_number,
         changed_file_count=(
             len(run.codebase_analysis.changed_files_repo_relative)
             if run.codebase_analysis
@@ -544,6 +779,7 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
     return RunDetailResponse(
         run_id=run.run_id,
         state=run.state,
+        workflow_mode=run.workflow_mode,
         execution_mode=run.execution_mode,
         requirements=run.requirements,
         repository=RepositorySummaryResponse(
@@ -556,8 +792,12 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
             resolved_base_commit=run.repository.resolved_base_commit,
             change_mode=run.repository.change_mode,
         ),
+        original_source_snapshot_sha256=run.original_source_snapshot_sha256,
+        original_git_diff_sha256=run.original_git_diff_sha256,
         source_snapshot_sha256=run.source_snapshot_sha256,
         git_diff_sha256=run.git_diff_sha256,
+        patch_proposal_sha256=run.patch_proposal_sha256,
+        patch_attempt_number=run.patch_attempt_number,
         created_at=run.created_at,
         updated_at=run.updated_at,
         allowed_actions=_allowed_actions(run),
@@ -573,6 +813,10 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         requirement_analysis=_to_requirement_analysis_response(
             run.requirement_analysis
         ),
+        pre_change_context=_to_pre_change_context_response(run.pre_change_context),
+        patch_generation=_to_patch_generation_response(run.patch_generation),
+        patch_validation=_to_patch_validation_response(run.patch_validation),
+        patch_application=_to_patch_application_response(run.patch_application),
         codebase_analysis=_to_codebase_response(run.codebase_analysis),
         test_generation=_to_test_generation_response(run.test_generation),
         test_review=run.test_review,

@@ -1,5 +1,11 @@
 """ChangeGuard AI Module 02 — Orchestration engine, config, store, workspace, adapters."""
 
+from .adapters import (
+    DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL,
+    DeterministicPremiumDiscountPatchFixture,
+    PatchGenerationAdapter,
+    PatchGeneratorProvider,
+)
 from .config import OrchestratorConfig
 from .orchestrator import (
     ACTIVE_EXECUTION_STATES,
@@ -20,6 +26,7 @@ from .orchestrator import (
     default_offline_model_stub,
     validate_transition,
 )
+from .patch_engine import PatchApplicator, PatchValidator
 from .requirement_analyst import (
     DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     RequirementAnalystAgent,
@@ -39,13 +46,19 @@ from .workspace import (
 __all__ = [
     "ACTIVE_EXECUTION_STATES",
     "ALLOWED_TRANSITIONS",
+    "DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL",
     "DEFAULT_OFFLINE_REQUIREMENT_LABEL",
+    "DeterministicPremiumDiscountPatchFixture",
     "InfrastructureUnavailableError",
     "InvalidStateTransitionError",
     "OrchestratorConfig",
     "OrchestratorError",
     "OrchestratorService",
     "PAUSED_REVIEW_STATES",
+    "PatchApplicator",
+    "PatchGenerationAdapter",
+    "PatchGeneratorProvider",
+    "PatchValidator",
     "RepositoryAccessDeniedError",
     "RequirementAnalystAgent",
     "ReviewConflictError",

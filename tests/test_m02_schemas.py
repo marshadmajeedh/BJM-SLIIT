@@ -26,6 +26,7 @@ from project.schemas import (
     TestReviewRequest,
     VerificationOutcome,
     VerificationResult,
+    WorkflowMode,
     WorkflowRunRecord,
     WorkflowState,
 )
@@ -36,6 +37,11 @@ def test_workflow_states_match_mvp_contract_without_patch_repair() -> None:
         "CREATED",
         "ANALYZING_REQUIREMENTS",
         "ANALYZING_CODEBASE",
+        "COLLECTING_PRE_CHANGE_CONTEXT",
+        "GENERATING_PATCH",
+        "VALIDATING_PATCH",
+        "APPLYING_PATCH",
+        "ANALYZING_POST_PATCH_IMPACT",
         "GENERATING_TESTS",
         "AWAITING_TEST_REVIEW",
         "RUNNING_VERIFICATION",
@@ -59,6 +65,7 @@ def test_create_run_request_defaults_and_validation() -> None:
         base_ref="HEAD",
         requirements="Apply 10% discount for premium customers only.",
     )
+    assert req.workflow_mode == WorkflowMode.VERIFY_EXISTING_CHANGE
     assert req.execution_mode == ExecutionMode.OFFLINE_TEST
     assert req.source_path == "sample_projects/mini_pos"
 

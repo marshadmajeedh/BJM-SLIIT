@@ -317,9 +317,19 @@ class ChangePackageReport(BaseModel):
     base_ref: str = Field(..., min_length=1)
     resolved_base_commit: str | None = None
     change_mode: str = "unknown"
+    workflow_mode: str = "verify_existing_change"
     execution_mode: str = "offline_test"
     model_label: str | None = None
     is_mock_output: bool | None = None
+    patch_proposal_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    patch_is_deterministic_fixture: bool | None = None
+    patch_applied: bool | None = None
+    original_source_snapshot_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    resulting_source_snapshot_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     changed_files: list[str] = Field(default_factory=list)
     impacted_modules: list[str] = Field(default_factory=list)
     approved_scenario_ids: list[str] = Field(default_factory=list)

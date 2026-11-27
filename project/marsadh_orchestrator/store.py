@@ -127,6 +127,73 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             }
         )
 
+    if run.pre_change_context is not None:
+        updates["pre_change_context"] = run.pre_change_context.model_copy(
+            update={
+                "limitation_notes": [
+                    redact_secrets(note)
+                    for note in run.pre_change_context.limitation_notes
+                ],
+                "error": _sanitize_error(run.pre_change_context.error),
+            }
+        )
+
+    if run.patch_generation_request is not None:
+        req_obj = run.patch_generation_request
+        sanitized_prev = (
+            redact_nested_secrets(req_obj.previous_verification_evidence)
+            if req_obj.previous_verification_evidence is not None
+            else None
+        )
+        updates["patch_generation_request"] = req_obj.model_copy(
+            update={
+                "original_requirement": redact_secrets(req_obj.original_requirement),
+                # Never persist raw source file contents into SQLite; retain file path list only.
+                "relevant_source_files": {},
+                "previous_verification_evidence": (
+                    sanitized_prev if isinstance(sanitized_prev, dict) else None
+                ),
+            }
+        )
+
+    if run.patch_generation is not None:
+        pg = run.patch_generation
+        sanitized_proposal = None
+        if pg.proposal is not None:
+            sanitized_proposal = pg.proposal.model_copy(
+                update={
+                    "change_rationale": redact_secrets(pg.proposal.change_rationale),
+                    "assumptions": [redact_secrets(a) for a in pg.proposal.assumptions],
+                    "risk_indicators": [
+                        redact_secrets(r) for r in pg.proposal.risk_indicators
+                    ],
+                    "notes": [redact_secrets(n) for n in pg.proposal.notes],
+                }
+            )
+        updates["patch_generation"] = pg.model_copy(
+            update={
+                "proposal": sanitized_proposal,
+                "error": _sanitize_error(pg.error),
+                "notes": [redact_secrets(note) for note in pg.notes],
+            }
+        )
+
+    if run.patch_validation is not None:
+        updates["patch_validation"] = run.patch_validation.model_copy(
+            update={
+                "violations": [
+                    sanitized
+                    for v in run.patch_validation.violations
+                    if (sanitized := _sanitize_error(v)) is not None
+                ],
+            }
+        )
+
+    if run.patch_application is not None:
+        updates["patch_application"] = run.patch_application.model_copy(
+            update={"error": _sanitize_error(run.patch_application.error)}
+        )
+
     if run.codebase_analysis is not None and run.codebase_analysis.error is not None:
         updates["codebase_analysis"] = run.codebase_analysis.model_copy(
             update={"error": _sanitize_error(run.codebase_analysis.error)}

@@ -57,29 +57,41 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | :--- | :--- | :--- | :--- |
 | `CREATED` | Active | Run persisted; workspace preparation queued | Poll `GET /api/runs/{run_id}` |
 | `ANALYZING_REQUIREMENTS` | Active | A1 decomposing natural-language requirement into structured criteria, constraints, assumptions, and ambiguities | Poll `GET /api/runs/{run_id}` |
-| `ANALYZING_CODEBASE` | Active | M01 static Git diff & reverse-dependency BFS running | Poll `GET /api/runs/{run_id}` |
+| `ANALYZING_CODEBASE` | Active | (`verify_existing_change`) M01 static Git diff & reverse-dependency BFS running | Poll `GET /api/runs/{run_id}` |
+| `COLLECTING_PRE_CHANGE_CONTEXT` | Active | (`generate_and_verify_change`) Collecting static M01 AST index & checking blocking ambiguities | Poll `GET /api/runs/{run_id}` |
+| `GENERATING_PATCH` | Active | (`generate_and_verify_change`) Invoking injectable A4 `PatchGenerationAdapter` | Poll `GET /api/runs/{run_id}` |
+| `VALIDATING_PATCH` | Active | (`generate_and_verify_change`) Running safety, path, symlink, size, hash, and `git apply --check` validation | Poll `GET /api/runs/{run_id}` |
+| `APPLYING_PATCH` | Active | (`generate_and_verify_change`) Applying validated patch in isolated workspace & recomputing snapshot/diff hashes | Poll `GET /api/runs/{run_id}` |
+| `ANALYZING_POST_PATCH_IMPACT` | Active | (`generate_and_verify_change`) M01 post-patch diff & reverse-dependency impact analysis | Poll `GET /api/runs/{run_id}` |
 | `GENERATING_TESTS` | Active | M03 generating unexecuted test proposals | Poll `GET /api/runs/{run_id}` |
-| `AWAITING_TEST_REVIEW` | **Paused Gate 1** | Proposals ready; **no tests exported or executed yet** | Stop polling; render M01 impact + M03 scenarios; enable `POST /test-review` |
+| `AWAITING_TEST_REVIEW` | **Paused Gate 1** | Proposals ready; **no tests exported or executed yet** | Stop polling; render patch/impact evidence + M03 scenarios; enable `POST /test-review` |
 | `RUNNING_VERIFICATION` | Active | Selected approved tests exported & running under M04 `pytest` | Poll `GET /api/runs/{run_id}` |
 | `COMPILING_REPORT` | Active | Aggregating auditable `ChangePackageReport` | Poll `GET /api/runs/{run_id}` |
 | `AWAITING_FINAL_APPROVAL` | **Paused Gate 2** | Change package ready for human sign-off | Stop polling; render evidence, risk, limitations, logs; enable `POST /decision` |
-| `COMPLETED_NO_CHANGES` | Terminal | Zero tracked Python changes found; M03 & M04 skipped (**not verification proof**) | Display informational notice; stop polling |
+| `COMPLETED_NO_CHANGES` | Terminal | (`verify_existing_change`) Zero tracked Python changes found; M03 & M04 skipped (**not verification proof**) | Display informational notice; stop polling |
 | `APPROVED` | Terminal | Final human approval recorded (**no Git commit/merge/push performed**) | Display decision badge; stop polling |
 | `REJECTED` | Terminal | Rejected at Gate 1 (tests) or Gate 2 (change package) | Display rejection notes; stop polling |
 | `NEEDS_REVIEW` | Terminal | Escalated for manual investigation (e.g., failed/incomplete verification) | Display escalation comments; stop polling |
-| `FAILED` | Terminal | Unrecoverable adapter, workspace, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
+| `FAILED` | Terminal | Unrecoverable adapter, workspace, patch safety, missing A4, ambiguity block, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
 
 ### Polling Recommendations
-- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `GENERATING_TESTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
+- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `COLLECTING_PRE_CHANGE_CONTEXT`, `GENERATING_PATCH`, `VALIDATING_PATCH`, `APPLYING_PATCH`, `ANALYZING_POST_PATCH_IMPACT`, `GENERATING_TESTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
 - **Stop polling immediately** when `state` enters `AWAITING_TEST_REVIEW`, `AWAITING_FINAL_APPROVAL`, or any terminal state (`COMPLETED_NO_CHANGES`, `APPROVED`, `REJECTED`, `NEEDS_REVIEW`, `FAILED`).
 - Use `allowed_actions` from `GET /api/runs/{run_id}` to enable/disable buttons cleanly:
   - `["submit_test_review"]` -> enable Gate 1 approval/rejection controls.
   - `["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]` -> enable all Gate 2 buttons.
-  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass OR mandatory unresolved requirement ambiguities remain open).
+  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass, mandatory unresolved requirement ambiguities remain open, or a `generate_and_verify_change` run lacks applied patch evidence).
 
 ---
 
-## 4. Execution Mode Distinctions
+## 4. Workflow Modes & Execution Mode Distinctions
+
+Keep `workflow_mode` (workflow purpose) strictly separate from `execution_mode` (provider mode):
+
+| Field | Value | Behavior |
+| :--- | :--- | :--- |
+| `workflow_mode` | `"verify_existing_change"` (default) | Existing diff-driven verification pipeline; clean repositories stop in `COMPLETED_NO_CHANGES`. |
+| `workflow_mode` | `"generate_and_verify_change"` | Clean-repository patch generation & verification pipeline via injectable A4 `PatchGenerationAdapter` (see [`PATCH_GENERATION_INTEGRATION.md`](./PATCH_GENERATION_INTEGRATION.md)). Fails with `PATCH_GENERATOR_UNAVAILABLE` if A4 is unconfigured. |
 
 | Mode | Value | Behavior | UI Badge Requirement |
 | :--- | :--- | :--- | :--- |
@@ -103,6 +115,8 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
   "database_available": true,
   "live_llm_configured": false,
   "groq_model": null,
+  "patch_generator_configured": false,
+  "supported_workflow_modes": ["verify_existing_change", "generate_and_verify_change"],
   "verification_dependencies_available": true,
   "git_available": true,
   "configured_repository_ids": ["mini-pos-demo"],
@@ -124,16 +138,18 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
   "source_path": "sample_projects/mini_pos",
   "base_ref": "HEAD",
   "requirements": "Apply a 10% discount to premium customers only without affecting regular checkout or refunds.",
+  "workflow_mode": "verify_existing_change",
   "execution_mode": "offline_test"
 }
 ```
-> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`.
+> Either `repository_id` (recommended for dashboard) or an allowlisted `repository_path` must be supplied. Disallowed repositories return `403 Forbidden`. `workflow_mode` defaults to `"verify_existing_change"` for backward compatibility; pass `"generate_and_verify_change"` for clean-repository patch generation workflows.
 
 **Example Response (`202 Accepted` — `CreateRunResponse`):**
 ```json
 {
   "run_id": "run_20261127T050000Z_a1b2c3d4e5f6",
   "state": "CREATED",
+  "workflow_mode": "verify_existing_change",
   "execution_mode": "offline_test",
   "created_at": "2026-11-27T05:00:00.123456Z",
   "execution_model": "in_process_background_task",
@@ -531,7 +547,7 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 ## 8. Known MVP Limitations
 
 1. **In-process background execution:** Runs execute in a single-process bounded thread pool (not Redis/Celery). Process restarts mark interrupted active runs as `FAILED` without replaying external LLM calls or pytest; paused human-review runs remain resumable.
-2. **No OS/container sandbox:** Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled.
+2. **No OS/container sandbox:** Git workspace isolation is not an OS security sandbox. Pytest runs only on explicitly server-trusted roots (`CHANGEGUARD_TRUSTED_EXECUTION_ROOTS`); untrusted execution remains disabled.
 3. **No authentication layer:** Reviewer labels are unauthenticated local metadata.
-4. **No automated patch generation / repair loop:** `max_repair_attempts` is reserved in config only.
+4. **A4 patch generation agent unimplemented (integration infrastructure ready):** `PatchGenerationAdapter` and controlled patch validation/application are ready for dependency injection of the future teammate-owned A4 agent (`PATCH_GENERATOR_UNAVAILABLE` until connected); `max_repair_attempts` remains reserved.
 5. **No baseline-vs-modified regression comparison, coverage measurement, or AI root-cause analysis:** Explicitly reported as `unavailable` in responses rather than fabricated.
