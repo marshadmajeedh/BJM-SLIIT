@@ -9,6 +9,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -79,6 +80,10 @@ from project.schemas import (
     WorkflowMode,
     WorkflowRunRecord,
     WorkflowState,
+)
+
+_ABSOLUTE_HOST_PATH_PATTERN = re.compile(
+    r"(?<![\w:/])/(?:[^\s\"'<>),;]+)|(?<![\w])(?:[A-Za-z]:[\\/])(?:[^\s\"'<>),;]+)"
 )
 
 
@@ -978,7 +983,7 @@ def _redact_host_paths_str(text: str, host_paths: tuple[str | None, ...]) -> str
     for host_path in host_paths:
         if host_path:
             sanitized = sanitized.replace(host_path, "[host path redacted]")
-    return sanitized
+    return _ABSOLUTE_HOST_PATH_PATTERN.sub("[host path redacted]", sanitized)
 
 
 def _to_independent_review_response(
