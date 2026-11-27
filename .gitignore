@@ -8,3 +8,9 @@ __pycache__/
 .coverage.*
 sample_projects/**/coverage.json
 sample_projects/**/report.json
+.changeguard/
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
