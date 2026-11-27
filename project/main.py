@@ -29,6 +29,10 @@ from project.marsadh_orchestrator.adapters import (
     VerificationAdapter,
 )
 from project.marsadh_orchestrator.config import OrchestratorConfig
+from project.marsadh_orchestrator.requirement_analyst import (
+    DEFAULT_OFFLINE_REQUIREMENT_LABEL,
+    RequirementAnalystAgent,
+)
 from project.marsadh_orchestrator.orchestrator import (
     InfrastructureUnavailableError,
     InvalidStateTransitionError,
@@ -73,6 +77,11 @@ def create_app(
     config: OrchestratorConfig | None = None,
     *,
     orchestrator: OrchestratorService | None = None,
+    requirement_analyst: RequirementAnalystAgent | None = None,
+    requirement_offline_callable: Callable[[str], str] | None = None,
+    requirement_offline_label: str = DEFAULT_OFFLINE_REQUIREMENT_LABEL,
+    requirement_live_callable: Callable[[str], str] | None = None,
+    requirement_live_label: str | None = None,
     offline_model_callable: Callable[[str], str] | None = None,
     offline_model_label: str = "deterministic_offline_stub",
     live_model_callable: Callable[[str], str] | None = None,
@@ -94,6 +103,11 @@ def create_app(
             codebase_adapter=codebase_adapter,
             testing_adapter=testing_adapter,
             verification_adapter=verification_adapter,
+            requirement_analyst=requirement_analyst,
+            requirement_offline_callable=requirement_offline_callable,
+            requirement_offline_label=requirement_offline_label,
+            requirement_live_callable=requirement_live_callable,
+            requirement_live_label=requirement_live_label,
             offline_model_callable=offline_model_callable,
             offline_model_label=offline_model_label,
             live_model_callable=live_model_callable,

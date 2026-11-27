@@ -28,6 +28,9 @@ from pathlib import Path, PurePath
 from project.agents.munshif_testing.agent import generate_tests
 from project.agents.munshif_testing.export import export_scenarios
 from project.marsadh_orchestrator.config import OrchestratorConfig
+from project.marsadh_orchestrator.requirement_analyst import (
+    format_requirements_for_downstream,
+)
 from project.marsadh_orchestrator.store import redact_secrets
 from project.schemas.agents import (
     AgentError,
@@ -35,6 +38,7 @@ from project.schemas.agents import (
     GeneratedTestScenario,
     TestGenerationResult,
 )
+from project.schemas.requirements import RequirementAnalysisResult
 from project.schemas.workflow import ExecutionMode
 
 _GROQ_ENV_LOCK = threading.Lock()
@@ -159,6 +163,7 @@ class TestingAdapter:
         codebase_result: CodebaseAnalysisResult,
         requirements: str,
         *,
+        requirement_analysis: RequirementAnalysisResult | None = None,
         execution_mode: ExecutionMode = ExecutionMode.OFFLINE_TEST,
         model_callable: Callable[[str], str] | None = None,
         model_label: str | None = None,
@@ -263,12 +268,17 @@ class TestingAdapter:
             active_model = model_callable
             resolved_label = model_label or "deterministic_offline_stub"
 
+        effective_requirements = format_requirements_for_downstream(
+            requirements,
+            requirement_analysis,
+        )
+
         try:
             raw_proposals = generate_tests(
                 repo_resolved,
                 raw_report,
                 active_model,
-                requirements,
+                effective_requirements,
             )
         except json.JSONDecodeError as exc:
             return TestGenerationResult(
@@ -332,9 +342,79 @@ class TestingAdapter:
                 ),
             )
 
+        valid_criterion_ids: set[str] | None = (
+            {ac.criterion_id for ac in requirement_analysis.acceptance_criteria}
+            if requirement_analysis is not None and requirement_analysis.acceptance_criteria
+            else None
+        )
+
         scenarios: list[GeneratedTestScenario] = []
+        any_explicit_criterion_mapping = False
         for idx, item in enumerate(raw_proposals["scenarios"], start=1):
             test_code = str(item["test_code"])
+            raw_cids = item.get("criterion_ids")
+            parsed_cids: list[str] = []
+            if raw_cids is not None:
+                if not isinstance(raw_cids, list):
+                    return TestGenerationResult(
+                        status="error",
+                        executed=False,
+                        generation_mode=mode_value,
+                        is_mock_output=is_offline,
+                        model_label=resolved_label,
+                        raw_proposals=raw_proposals,
+                        error=AgentError(
+                            code="INVALID_CRITERION_REFERENCE",
+                            message=(
+                                f"Scenario #{idx} returned non-list 'criterion_ids'; "
+                                "expected a list of valid acceptance criterion IDs."
+                            ),
+                        ),
+                    )
+                for raw_cid in raw_cids:
+                    if not isinstance(raw_cid, str) or not _SCENARIO_ID_PATTERN.match(
+                        raw_cid.strip()
+                    ):
+                        return TestGenerationResult(
+                            status="error",
+                            executed=False,
+                            generation_mode=mode_value,
+                            is_mock_output=is_offline,
+                            model_label=resolved_label,
+                            raw_proposals=raw_proposals,
+                            error=AgentError(
+                                code="INVALID_CRITERION_REFERENCE",
+                                message=(
+                                    f"Scenario #{idx} returned invalid criterion identifier "
+                                    f"{raw_cid!r}."
+                                ),
+                            ),
+                        )
+                    cleaned_cid = raw_cid.strip()
+                    if (
+                        valid_criterion_ids is not None
+                        and cleaned_cid not in valid_criterion_ids
+                    ):
+                        return TestGenerationResult(
+                            status="error",
+                            executed=False,
+                            generation_mode=mode_value,
+                            is_mock_output=is_offline,
+                            model_label=resolved_label,
+                            raw_proposals=raw_proposals,
+                            error=AgentError(
+                                code="INVALID_CRITERION_REFERENCE",
+                                message=(
+                                    f"Scenario #{idx} references unknown criterion_id "
+                                    f"'{cleaned_cid}' not present in A1 requirement analysis."
+                                ),
+                            ),
+                        )
+                    if cleaned_cid not in parsed_cids:
+                        parsed_cids.append(cleaned_cid)
+                if parsed_cids:
+                    any_explicit_criterion_mapping = True
+
             scenarios.append(
                 GeneratedTestScenario(
                     scenario_id=f"SCN-{idx:03d}",
@@ -344,6 +424,7 @@ class TestingAdapter:
                     test_code=test_code,
                     content_sha256=_sha256_bytes(test_code.encode("utf-8")),
                     approved=False,
+                    criterion_ids=parsed_cids,
                 )
             )
 
@@ -353,6 +434,10 @@ class TestingAdapter:
         if is_offline:
             assumptions.append(
                 "Generated using an offline deterministic stub (is_mock_output=True); do not present as live AI-generated evidence."
+            )
+        if requirement_analysis is not None and not any_explicit_criterion_mapping:
+            assumptions.append(
+                "M03 did not return structured criterion_ids per scenario; criterion-to-test mapping remains unavailable and is not inferred from test names."
             )
 
         return TestGenerationResult(
