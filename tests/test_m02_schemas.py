@@ -34,6 +34,7 @@ from project.schemas import (
 def test_workflow_states_match_mvp_contract_without_patch_repair() -> None:
     expected = {
         "CREATED",
+        "ANALYZING_REQUIREMENTS",
         "ANALYZING_CODEBASE",
         "GENERATING_TESTS",
         "AWAITING_TEST_REVIEW",

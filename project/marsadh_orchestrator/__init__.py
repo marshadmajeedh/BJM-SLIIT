@@ -20,6 +20,13 @@ from .orchestrator import (
     default_offline_model_stub,
     validate_transition,
 )
+from .requirement_analyst import (
+    DEFAULT_OFFLINE_REQUIREMENT_LABEL,
+    RequirementAnalystAgent,
+    build_requirement_analysis_prompt,
+    deterministic_offline_requirement_analyzer,
+    format_requirements_for_downstream,
+)
 from .store import RunStore, generate_log_id, generate_run_id, redact_secrets
 from .workspace import (
     UnsupportedWorkspaceStateError,
@@ -32,6 +39,7 @@ from .workspace import (
 __all__ = [
     "ACTIVE_EXECUTION_STATES",
     "ALLOWED_TRANSITIONS",
+    "DEFAULT_OFFLINE_REQUIREMENT_LABEL",
     "InfrastructureUnavailableError",
     "InvalidStateTransitionError",
     "OrchestratorConfig",
@@ -39,6 +47,7 @@ __all__ = [
     "OrchestratorService",
     "PAUSED_REVIEW_STATES",
     "RepositoryAccessDeniedError",
+    "RequirementAnalystAgent",
     "ReviewConflictError",
     "RunNotFoundError",
     "RunStore",
@@ -50,9 +59,12 @@ __all__ = [
     "WorkspaceError",
     "WorkspaceManager",
     "WorkspaceSecurityError",
+    "build_requirement_analysis_prompt",
     "compute_git_diff_sha256",
     "compute_source_snapshot_sha256",
     "default_offline_model_stub",
+    "deterministic_offline_requirement_analyzer",
+    "format_requirements_for_downstream",
     "generate_log_id",
     "generate_run_id",
     "redact_secrets",

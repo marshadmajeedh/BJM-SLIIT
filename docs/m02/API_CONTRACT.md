@@ -42,9 +42,9 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | Method | Path | Success Status | Purpose |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | `200 OK` | Service health, DB availability, live LLM readiness, verification dependency checks |
-| `POST` | `/api/runs` | `202 Accepted` | Create workflow run and schedule M01 + M03 in-process |
+| `POST` | `/api/runs` | `202 Accepted` | Create workflow run and schedule A1 + M01 + M03 in-process |
 | `GET` | `/api/runs` | `200 OK` | List persisted runs with bounded pagination and optional `state` filter |
-| `GET` | `/api/runs/{run_id}` | `200 OK` | Retrieve full workflow state, M01/M03/M04 evidence, change package, and `allowed_actions` |
+| `GET` | `/api/runs/{run_id}` | `200 OK` | Retrieve full workflow state, A1/M01/M03/M04 evidence, change package, and `allowed_actions` |
 | `GET` | `/api/runs/{run_id}/logs` | `200 OK` | Retrieve secret-redacted inter-agent communication logs in deterministic order |
 | `POST` | `/api/runs/{run_id}/test-review` | `202 Accepted` (approved) / `200 OK` (rejected) | Human Review Gate 1: approve selected scenarios (schedules M04) or reject proposals |
 | `POST` | `/api/runs/{run_id}/decision` | `200 OK` | Human Review Gate 2: record final decision (`approve`, `reject`, `needs_review`) |
@@ -56,6 +56,7 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | State | Category | Meaning | Frontend Action |
 | :--- | :--- | :--- | :--- |
 | `CREATED` | Active | Run persisted; workspace preparation queued | Poll `GET /api/runs/{run_id}` |
+| `ANALYZING_REQUIREMENTS` | Active | A1 decomposing natural-language requirement into structured criteria, constraints, assumptions, and ambiguities | Poll `GET /api/runs/{run_id}` |
 | `ANALYZING_CODEBASE` | Active | M01 static Git diff & reverse-dependency BFS running | Poll `GET /api/runs/{run_id}` |
 | `GENERATING_TESTS` | Active | M03 generating unexecuted test proposals | Poll `GET /api/runs/{run_id}` |
 | `AWAITING_TEST_REVIEW` | **Paused Gate 1** | Proposals ready; **no tests exported or executed yet** | Stop polling; render M01 impact + M03 scenarios; enable `POST /test-review` |
@@ -69,12 +70,12 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 | `FAILED` | Terminal | Unrecoverable adapter, workspace, integrity, or restart interruption error | Display structured `error.code` & `error.message`; stop polling |
 
 ### Polling Recommendations
-- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_CODEBASE`, `GENERATING_TESTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
+- Poll `GET /api/runs/{run_id}` every **1000 ms – 1500 ms** while `state` is in active execution states (`CREATED`, `ANALYZING_REQUIREMENTS`, `ANALYZING_CODEBASE`, `GENERATING_TESTS`, `RUNNING_VERIFICATION`, `COMPILING_REPORT`).
 - **Stop polling immediately** when `state` enters `AWAITING_TEST_REVIEW`, `AWAITING_FINAL_APPROVAL`, or any terminal state (`COMPLETED_NO_CHANGES`, `APPROVED`, `REJECTED`, `NEEDS_REVIEW`, `FAILED`).
 - Use `allowed_actions` from `GET /api/runs/{run_id}` to enable/disable buttons cleanly:
   - `["submit_test_review"]` -> enable Gate 1 approval/rejection controls.
   - `["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]` -> enable all Gate 2 buttons.
-  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass).
+  - `["submit_final_decision:reject", "submit_final_decision:needs_review"]` -> disable `approve` (backend blocks `approve` with HTTP `409` whenever mandatory verification did not pass OR mandatory unresolved requirement ambiguities remain open).
 
 ---
 
@@ -164,6 +165,8 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
       "requirements_preview": "Apply a 10% discount to premium customers only without affecting regular checkout or refunds.",
       "created_at": "2026-11-27T05:00:00.123456Z",
       "updated_at": "2026-11-27T05:00:01.654321Z",
+      "acceptance_criteria_count": 4,
+      "has_unresolved_ambiguities": false,
       "changed_file_count": 1,
       "proposed_scenario_count": 2,
       "verification_outcome": null,
@@ -205,6 +208,23 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
     "submit_final_decision:reject",
     "submit_final_decision:needs_review"
   ],
+  "requirement_analysis": {
+    "status": "completed",
+    "analysis_mode": "offline_test",
+    "is_deterministic_fixture": true,
+    "is_mock_output": true,
+    "model_label": "deterministic_offline_requirement_analyst",
+    "requirement_summary": "Decomposed requirement into 4 acceptance criterion(s), 3 business constraint(s), 2 assumption(s), and 1 ambiguity item(s) (0 blocking).",
+    "acceptance_criteria": [],
+    "business_constraints": [],
+    "assumptions": [],
+    "ambiguities": [],
+    "preserved_behaviors": [],
+    "edge_cases": [],
+    "has_mandatory_unresolved_ambiguities": false,
+    "error": null,
+    "notes": []
+  },
   "codebase_analysis": {
     "status": "completed",
     "source_path": "sample_projects/mini_pos",
@@ -348,7 +368,8 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
     ],
     "traceability": {
       "requirement_traceability_status": "incomplete",
-      "structured_acceptance_criteria_status": "unavailable",
+      "structured_acceptance_criteria_status": "available",
+      "criterion_mapping_status": "unavailable",
       "requirement_verification_proven": false,
       "baseline_regression_comparison_status": "unavailable",
       "user_supplied_requirements": "Apply a 10% discount to premium customers only without affecting regular checkout or refunds.",
@@ -366,6 +387,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
       "verification_passed": true,
       "unverified_scenario_ids": []
     },
+    "criterion_traceability": [],
     "agent_communication_summary": [],
     "evidence_limitations": [
       "Baseline-versus-modified regression comparison was not executed; passing generated tests on the modified working copy alone does not guarantee complete regression safety.",
@@ -461,6 +483,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
 }
 ```
 - Approving when verification failed, timed out, had collection/zero-test errors, or was unavailable returns `409 Conflict` (`code: "VERIFICATION_APPROVAL_BLOCKED"`).
+- Approving when A1 detected mandatory unresolved requirement ambiguities returns `409 Conflict` (`code: "UNRESOLVED_REQUIREMENT_AMBIGUITY"`).
 - Final decisions never commit, merge, push, deploy, or modify the original repository.
 
 ---
@@ -483,7 +506,7 @@ All error responses use the `ErrorResponse` envelope (no tracebacks or secrets):
 | :--- | :--- | :--- |
 | `403 Forbidden` | Repository path or ID outside server allowlist | `REPOSITORY_ACCESS_DENIED` |
 | `404 Not Found` | Unknown workflow `run_id` | `RUN_NOT_FOUND` |
-| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `VERIFICATION_APPROVAL_BLOCKED`, `DUPLICATE_FINAL_DECISION` |
+| `409 Conflict` | Invalid state transition, duplicate review/decision, tampered content/snapshot, or blocked approval | `INVALID_STATE_TRANSITION`, `INVALID_REVIEW_STATE`, `DUPLICATE_TEST_REVIEW`, `TEST_CONTENT_MODIFIED`, `SOURCE_SNAPSHOT_MODIFIED`, `VERIFICATION_APPROVAL_BLOCKED`, `UNRESOLVED_REQUIREMENT_AMBIGUITY`, `DUPLICATE_FINAL_DECISION` |
 | `422 Unprocessable Content` | Invalid request DTO or unknown scenario ID for run | `VALIDATION_ERROR`, `UNKNOWN_SCENARIO_ID` |
 | `503 Service Unavailable` | Database or required local infrastructure failure | `INFRASTRUCTURE_UNAVAILABLE` |
 | `500 Internal Server Error` | Unexpected server error (safe generic message) | `INTERNAL_SERVER_ERROR` |

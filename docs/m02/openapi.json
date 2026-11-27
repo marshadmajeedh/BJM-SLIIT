@@ -419,6 +419,91 @@
   },
   "components": {
     "schemas": {
+      "AcceptanceCriterion": {
+        "properties": {
+          "criterion_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Criterion Id"
+          },
+          "requirement_reference": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Requirement Reference"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/CriterionPriority",
+            "default": "must"
+          },
+          "mandatory": {
+            "type": "boolean",
+            "title": "Mandatory",
+            "default": true
+          },
+          "expected_behavior": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Expected Behavior"
+          },
+          "verification_strategy": {
+            "$ref": "#/components/schemas/VerificationStrategy",
+            "default": "unit_test"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/CriterionOrigin",
+            "default": "explicit"
+          },
+          "is_edge_case": {
+            "type": "boolean",
+            "title": "Is Edge Case",
+            "default": false
+          },
+          "preserves_existing_behavior": {
+            "type": "boolean",
+            "title": "Preserves Existing Behavior",
+            "default": false
+          },
+          "target_modules": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Target Modules"
+          },
+          "assumption_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumption Ids"
+          },
+          "ambiguity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ambiguity Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "criterion_id",
+          "requirement_reference",
+          "description",
+          "expected_behavior"
+        ],
+        "title": "AcceptanceCriterion",
+        "description": "Single verifiable, traceable acceptance criterion extracted by A1."
+      },
       "AgentError": {
         "properties": {
           "code": {
@@ -616,6 +701,15 @@
         "title": "AgentLogEntry",
         "description": "Structured inter-agent communication and stage log entry."
       },
+      "AmbiguitySeverity": {
+        "type": "string",
+        "enum": [
+          "blocking",
+          "non_blocking"
+        ],
+        "title": "AmbiguitySeverity",
+        "description": "Severity indicating whether an ambiguity blocks verification sign-off."
+      },
       "BaselineComparisonEvidence": {
         "properties": {
           "status": {
@@ -710,6 +804,65 @@
         "type": "object",
         "title": "BaselineComparisonEvidence",
         "description": "Placeholder interface for future baseline-versus-modified regression runs."
+      },
+      "BusinessConstraint": {
+        "properties": {
+          "constraint_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Constraint Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "functional_rule",
+              "behavior_preservation",
+              "boundary",
+              "non_functional",
+              "compliance",
+              "other"
+            ],
+            "title": "Category",
+            "default": "functional_rule"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/CriterionOrigin",
+            "default": "explicit"
+          },
+          "preserves_existing_behavior": {
+            "type": "boolean",
+            "title": "Preserves Existing Behavior",
+            "default": false
+          },
+          "source_reference": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Reference"
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "constraint_id",
+          "description",
+          "source_reference"
+        ],
+        "title": "BusinessConstraint",
+        "description": "Structured business rule or existing-behavior preservation constraint."
       },
       "ChangePackageResponse": {
         "properties": {
@@ -842,6 +995,16 @@
             "type": "array",
             "title": "Executed Scenario Ids"
           },
+          "requirement_analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequirementAnalysisResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "risk_summary": {
             "$ref": "#/components/schemas/RiskSummary"
           },
@@ -877,6 +1040,13 @@
             },
             "type": "array",
             "title": "Unverified Requirements"
+          },
+          "criterion_traceability": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementTraceability"
+            },
+            "type": "array",
+            "title": "Criterion Traceability"
           },
           "traceability": {
             "additionalProperties": true,
@@ -1194,6 +1364,25 @@
         "title": "CreateRunResponse",
         "description": "HTTP 202 response returned when a workflow run is created and queued."
       },
+      "CriterionOrigin": {
+        "type": "string",
+        "enum": [
+          "explicit",
+          "inferred"
+        ],
+        "title": "CriterionOrigin",
+        "description": "Distinguishes directly stated requirements from model-inferred items."
+      },
+      "CriterionPriority": {
+        "type": "string",
+        "enum": [
+          "must",
+          "should",
+          "could"
+        ],
+        "title": "CriterionPriority",
+        "description": "Requirement priority level."
+      },
       "ErrorResponse": {
         "properties": {
           "code": {
@@ -1345,6 +1534,13 @@
             "type": "boolean",
             "title": "Approved",
             "default": false
+          },
+          "criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Criterion Ids"
           }
         },
         "additionalProperties": false,
@@ -1666,6 +1862,340 @@
         "title": "RepositorySummaryResponse",
         "description": "Safe repository metadata without internal absolute filesystem paths."
       },
+      "RequirementAmbiguity": {
+        "properties": {
+          "ambiguity_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Ambiguity Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "clarification_question": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Clarification Question"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/AmbiguitySeverity",
+            "default": "non_blocking"
+          },
+          "mandatory_to_resolve": {
+            "type": "boolean",
+            "title": "Mandatory To Resolve",
+            "default": false
+          },
+          "resolved": {
+            "type": "boolean",
+            "title": "Resolved",
+            "default": false
+          },
+          "resolution_notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Notes"
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ambiguity_id",
+          "description",
+          "clarification_question"
+        ],
+        "title": "RequirementAmbiguity",
+        "description": "Unresolved or resolved ambiguity identified during requirement analysis."
+      },
+      "RequirementAnalysisResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "needs_clarification",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "analysis_mode": {
+            "type": "string",
+            "enum": [
+              "offline_test",
+              "live_llm"
+            ],
+            "title": "Analysis Mode"
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture"
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output"
+          },
+          "model_label": {
+            "type": "string",
+            "title": "Model Label"
+          },
+          "requirement_summary": {
+            "type": "string",
+            "title": "Requirement Summary",
+            "default": ""
+          },
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/AcceptanceCriterion"
+            },
+            "type": "array",
+            "title": "Acceptance Criteria"
+          },
+          "business_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/BusinessConstraint"
+            },
+            "type": "array",
+            "title": "Business Constraints"
+          },
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementAssumption"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          },
+          "ambiguities": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementAmbiguity"
+            },
+            "type": "array",
+            "title": "Ambiguities"
+          },
+          "preserved_behaviors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preserved Behaviors"
+          },
+          "edge_cases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Edge Cases"
+          },
+          "has_mandatory_unresolved_ambiguities": {
+            "type": "boolean",
+            "title": "Has Mandatory Unresolved Ambiguities",
+            "default": false
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "analysis_mode",
+          "is_deterministic_fixture",
+          "is_mock_output",
+          "model_label"
+        ],
+        "title": "RequirementAnalysisResponse",
+        "description": "Normalized A1 structured requirement analysis view for dashboard consumption."
+      },
+      "RequirementAssumption": {
+        "properties": {
+          "assumption_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Assumption Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Rationale"
+          },
+          "requires_human_confirmation": {
+            "type": "boolean",
+            "title": "Requires Human Confirmation",
+            "default": true
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "assumption_id",
+          "description",
+          "rationale"
+        ],
+        "title": "RequirementAssumption",
+        "description": "Inferred assumption explicitly separated from stated requirements."
+      },
+      "RequirementTraceability": {
+        "properties": {
+          "criterion_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Criterion Id"
+          },
+          "requirement_reference": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Requirement Reference"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/CriterionOrigin",
+            "default": "explicit"
+          },
+          "mandatory": {
+            "type": "boolean",
+            "title": "Mandatory",
+            "default": true
+          },
+          "affected_source_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Affected Source Files"
+          },
+          "file_mapping_status": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "repository_scope_only",
+              "unavailable"
+            ],
+            "title": "File Mapping Status",
+            "default": "unavailable"
+          },
+          "generated_scenario_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Generated Scenario Ids"
+          },
+          "approved_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved Test Ids"
+          },
+          "executed_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Executed Test Ids"
+          },
+          "mapping_status": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "unavailable"
+            ],
+            "title": "Mapping Status",
+            "default": "unavailable"
+          },
+          "execution_evidence_summary": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Execution Evidence Summary",
+            "default": "No structured criterion-to-test execution evidence available."
+          },
+          "verification_status": {
+            "$ref": "#/components/schemas/TraceabilityEvidenceStatus",
+            "default": "unverified"
+          },
+          "unresolved_ambiguity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unresolved Ambiguity Ids"
+          },
+          "assumption_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumption Ids"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "criterion_id",
+          "requirement_reference",
+          "description"
+        ],
+        "title": "RequirementTraceability",
+        "description": "Per-criterion traceability linking requirement -> files -> tests -> evidence."
+      },
       "RiskSummary": {
         "properties": {
           "severity": {
@@ -1778,6 +2308,16 @@
             },
             "type": "array",
             "title": "Agent Records"
+          },
+          "requirement_analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequirementAnalysisResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "codebase_analysis": {
             "anyOf": [
@@ -1963,6 +2503,16 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "acceptance_criteria_count": {
+            "type": "integer",
+            "title": "Acceptance Criteria Count",
+            "default": 0
+          },
+          "has_unresolved_ambiguities": {
+            "type": "boolean",
+            "title": "Has Unresolved Ambiguities",
+            "default": false
           },
           "changed_file_count": {
             "type": "integer",
@@ -2190,6 +2740,17 @@
         ],
         "title": "TestReviewRequest",
         "description": "Human review decision for generated test proposals before verification."
+      },
+      "TraceabilityEvidenceStatus": {
+        "type": "string",
+        "enum": [
+          "verified",
+          "failed",
+          "unverified",
+          "needs_clarification"
+        ],
+        "title": "TraceabilityEvidenceStatus",
+        "description": "Truthful verification status for an individual acceptance criterion."
       },
       "ValidationError": {
         "properties": {
@@ -2420,10 +2981,22 @@
         "title": "VerificationResponse",
         "description": "Normalized M04 verification evidence excluding raw runner internals."
       },
+      "VerificationStrategy": {
+        "type": "string",
+        "enum": [
+          "unit_test",
+          "integration_test",
+          "regression_test",
+          "manual_review"
+        ],
+        "title": "VerificationStrategy",
+        "description": "Expected verification method for an acceptance criterion."
+      },
       "WorkflowState": {
         "type": "string",
         "enum": [
           "CREATED",
+          "ANALYZING_REQUIREMENTS",
           "ANALYZING_CODEBASE",
           "GENERATING_TESTS",
           "AWAITING_TEST_REVIEW",

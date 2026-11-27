@@ -419,7 +419,7 @@ def test_m03_failures_and_live_llm_never_falls_back_to_mock(tmp_path) -> None:
     assert r_inv.error is not None
     assert r_inv.error.code == "INVALID_MODEL_OUTPUT"
 
-    # 4c. Live LLM without credentials must fail explicitly (never silently fall back to offline stub)
+    # 4c. Live LLM without credentials must fail explicitly at A1 (never silently fall back to offline stub)
     svc_live = _make_service(cfg, offline_model_callable=_two_scenario_stub())
     r_live = svc_live.start_run(
         CreateRunRequest(
@@ -432,8 +432,10 @@ def test_m03_failures_and_live_llm_never_falls_back_to_mock(tmp_path) -> None:
     assert r_live.state == WorkflowState.FAILED
     assert r_live.error is not None
     assert r_live.error.code == "LIVE_LLM_UNCONFIGURED"
-    assert r_live.test_generation is not None
-    assert r_live.test_generation.is_mock_output is False
+    assert r_live.requirement_analysis is not None
+    assert r_live.requirement_analysis.is_deterministic_fixture is False
+    assert r_live.requirement_analysis.is_mock_output is False
+    assert r_live.test_generation is None
 
 
 # ---------------------------------------------------------------------------

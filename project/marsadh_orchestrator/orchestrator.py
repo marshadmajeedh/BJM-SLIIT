@@ -35,6 +35,10 @@ from project.marsadh_orchestrator.adapters import (
     build_approved_test_specs,
 )
 from project.marsadh_orchestrator.config import OrchestratorConfig
+from project.marsadh_orchestrator.requirement_analyst import (
+    DEFAULT_OFFLINE_REQUIREMENT_LABEL,
+    RequirementAnalystAgent,
+)
 from project.marsadh_orchestrator.store import RunStore, generate_run_id, utc_now
 from project.marsadh_orchestrator.workspace import (
     EXCLUDED_DIR_NAMES,
@@ -48,6 +52,7 @@ from project.schemas import (
     AgentExecutionRecord,
     AgentExecutionStatus,
     AgentLogEntry,
+    AmbiguitySeverity,
     ApprovedTestSpec,
     ChangePackageReport,
     CodebaseAnalysisResult,
@@ -57,10 +62,13 @@ from project.schemas import (
     HumanDecisionRecord,
     HumanDecisionRequest,
     RepositoryInfo,
+    RequirementAnalysisResult,
+    RequirementTraceability,
     RiskSummary,
     TestGenerationResult,
     TestReviewRecord,
     TestReviewRequest,
+    TraceabilityEvidenceStatus,
     VerificationOutcome,
     VerificationResult,
     WorkflowRunRecord,
@@ -89,6 +97,7 @@ PAUSED_REVIEW_STATES: frozenset[WorkflowState] = frozenset(
 ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
     {
         WorkflowState.CREATED,
+        WorkflowState.ANALYZING_REQUIREMENTS,
         WorkflowState.ANALYZING_CODEBASE,
         WorkflowState.GENERATING_TESTS,
         WorkflowState.RUNNING_VERIFICATION,
@@ -98,6 +107,12 @@ ACTIVE_EXECUTION_STATES: frozenset[WorkflowState] = frozenset(
 
 ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.CREATED: frozenset(
+        {
+            WorkflowState.ANALYZING_REQUIREMENTS,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.ANALYZING_REQUIREMENTS: frozenset(
         {
             WorkflowState.ANALYZING_CODEBASE,
             WorkflowState.FAILED,
@@ -503,6 +518,11 @@ class OrchestratorService:
         testing_adapter: TestingAdapter,
         verification_adapter: VerificationAdapter,
         *,
+        requirement_analyst: RequirementAnalystAgent | None = None,
+        requirement_offline_callable: Callable[[str], str] | None = None,
+        requirement_offline_label: str = DEFAULT_OFFLINE_REQUIREMENT_LABEL,
+        requirement_live_callable: Callable[[str], str] | None = None,
+        requirement_live_label: str | None = None,
         offline_model_callable: Callable[[str], str] | None = None,
         offline_model_label: str = "deterministic_offline_stub",
         live_model_callable: Callable[[str], str] | None = None,
@@ -512,6 +532,13 @@ class OrchestratorService:
         self.config = config
         self.store = store
         self.workspace_manager = workspace_manager
+        self.requirement_analyst = requirement_analyst or RequirementAnalystAgent(
+            config=config,
+            offline_analyzer_callable=requirement_offline_callable,
+            offline_model_label=requirement_offline_label,
+            live_model_callable=requirement_live_callable,
+            live_model_label=requirement_live_label,
+        )
         self.codebase_adapter = codebase_adapter
         self.testing_adapter = testing_adapter
         self.verification_adapter = verification_adapter
@@ -916,11 +943,11 @@ class OrchestratorService:
             ),
         )
 
-        # Persist workspace context & snapshot hashes and transition CREATED -> ANALYZING_CODEBASE
+        # Persist workspace context & snapshot hashes and transition CREATED -> ANALYZING_REQUIREMENTS
         run = self.transition_state(
             run_id,
             WorkflowState.CREATED,
-            WorkflowState.ANALYZING_CODEBASE,
+            WorkflowState.ANALYZING_REQUIREMENTS,
             updater=lambda current: current.model_copy(
                 update={
                     "workspace_id": ws_ctx.workspace_id,
@@ -940,10 +967,137 @@ class OrchestratorService:
                     "agent_records": [*current.agent_records, ws_record],
                 }
             ),
-            reason="Workspace prepared; starting M01 codebase analysis.",
+            reason="Workspace prepared; starting A1 structured requirement analysis.",
         )
 
-        # ---- Stage 1: M01 Codebase Analysis ----
+        # ---- Stage 1: A1 Structured Requirement Analysis ----
+        a1_started = utc_now()
+        a1_t0 = time.perf_counter()
+        self._log(
+            run_id=run_id,
+            agent_name="RequirementAnalystAgent",
+            stage=WorkflowState.ANALYZING_REQUIREMENTS,
+            status=AgentExecutionStatus.SUCCEEDED,
+            input_summary=(
+                f"Decomposing natural-language requirement ({len(run.requirements)} chars) "
+                f"in mode={run.execution_mode.value}."
+            ),
+            output_summary="Invoked A1 RequirementAnalystAgent.analyze.",
+        )
+        try:
+            req_result = self.requirement_analyst.analyze(
+                run.requirements,
+                execution_mode=run.execution_mode,
+                repository_context={
+                    "repository_id": run.repository.repository_id,
+                    "source_path": ws_ctx.source_path,
+                    "base_ref": ws_ctx.base_ref,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            a1_dur_ms = int((time.perf_counter() - a1_t0) * 1000)
+            err = AgentError(
+                code="A1_UNEXPECTED_ERROR",
+                message=f"RequirementAnalystAgent raised an unexpected exception: {exc}",
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="RequirementAnalystAgent",
+                stage=WorkflowState.ANALYZING_REQUIREMENTS,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=a1_dur_ms,
+                output_summary="A1 requirement analysis failed with unexpected exception.",
+                error=err,
+            )
+            return self._fail_run(run_id, WorkflowState.ANALYZING_REQUIREMENTS, err)
+
+        a1_dur_ms = int((time.perf_counter() - a1_t0) * 1000)
+        if req_result.status == "error" or not req_result.acceptance_criteria:
+            err = req_result.error or AgentError(
+                code="A1_REQUIREMENT_ANALYSIS_FAILED",
+                message="A1 requirement analysis did not produce valid acceptance criteria.",
+            )
+            a1_rec = AgentExecutionRecord(
+                agent_name="RequirementAnalystAgent",
+                stage=WorkflowState.ANALYZING_REQUIREMENTS.value,
+                status=AgentExecutionStatus.FAILED,
+                started_at=a1_started,
+                completed_at=utc_now(),
+                duration_ms=a1_dur_ms,
+                execution_mode=run.execution_mode.value,
+                output_summary=err.message,
+                error=err,
+            )
+            self._log(
+                run_id=run_id,
+                agent_name="RequirementAnalystAgent",
+                stage=WorkflowState.ANALYZING_REQUIREMENTS,
+                status=AgentExecutionStatus.FAILED,
+                duration_ms=a1_dur_ms,
+                input_summary=f"mode={run.execution_mode.value}",
+                output_summary=err.message,
+                error=err,
+            )
+            return self._fail_run(
+                run_id,
+                WorkflowState.ANALYZING_REQUIREMENTS,
+                err,
+                updater=lambda current: current.model_copy(
+                    update={
+                        "requirement_analysis": req_result,
+                        "agent_records": [*current.agent_records, a1_rec],
+                    }
+                ),
+            )
+
+        a1_source = (
+            "deterministic_fixture" if req_result.is_deterministic_fixture else "live_llm"
+        )
+        a1_summary = (
+            f"Extracted {len(req_result.acceptance_criteria)} acceptance criterion(s), "
+            f"{len(req_result.business_constraints)} constraint(s), "
+            f"{len(req_result.assumptions)} assumption(s), "
+            f"{len(req_result.ambiguities)} ambiguity item(s) "
+            f"(status={req_result.status}, model={req_result.model_label}, source={a1_source})."
+        )
+        a1_rec = AgentExecutionRecord(
+            agent_name="RequirementAnalystAgent",
+            stage=WorkflowState.ANALYZING_REQUIREMENTS.value,
+            status=AgentExecutionStatus.SUCCEEDED,
+            started_at=a1_started,
+            completed_at=utc_now(),
+            duration_ms=a1_dur_ms,
+            execution_mode=run.execution_mode.value,
+            output_summary=a1_summary,
+            assumptions=[asm.description for asm in req_result.assumptions],
+        )
+        self._log(
+            run_id=run_id,
+            agent_name="RequirementAnalystAgent",
+            stage=WorkflowState.ANALYZING_REQUIREMENTS,
+            status=AgentExecutionStatus.SUCCEEDED,
+            duration_ms=a1_dur_ms,
+            input_summary=f"mode={run.execution_mode.value}, model={req_result.model_label}",
+            output_summary=a1_summary,
+        )
+
+        run = self.transition_state(
+            run_id,
+            WorkflowState.ANALYZING_REQUIREMENTS,
+            WorkflowState.ANALYZING_CODEBASE,
+            updater=lambda current: current.model_copy(
+                update={
+                    "requirement_analysis": req_result,
+                    "agent_records": [*current.agent_records, a1_rec],
+                }
+            ),
+            reason=(
+                f"A1 requirement analysis completed ({req_result.status}); "
+                "starting M01 codebase analysis."
+            ),
+        )
+
+        # ---- Stage 2: M01 Codebase Analysis ----
         m01_started = utc_now()
         m01_t0 = time.perf_counter()
         self._log(
@@ -1131,6 +1285,7 @@ class OrchestratorService:
                 ws_ctx.workspace_repo_path,
                 cb_result,
                 run.requirements,
+                requirement_analysis=run.requirement_analysis,
                 execution_mode=run.execution_mode,
                 model_callable=model_callable,
                 model_label=model_label,
@@ -1805,6 +1960,318 @@ class OrchestratorService:
             ),
         )
 
+    def _build_criterion_traceability(
+        self,
+        run: WorkflowRunRecord,
+        verification: VerificationResult,
+        *,
+        changed_files: list[str],
+        impacted_modules: list[str],
+        proposed_ids: list[str],
+        approved_ids: list[str],
+        executed_ids: list[str],
+        unapproved_ids: list[str],
+    ) -> tuple[list[RequirementTraceability], dict[str, Any], list[str]]:
+        """Build truthful per-criterion traceability without fabricating scenario mappings."""
+        outcome = verification.verification_outcome
+        req_analysis = run.requirement_analysis
+        gen = run.test_generation
+
+        if req_analysis is None or not req_analysis.acceptance_criteria:
+            unverified_reqs: list[str] = [
+                "Full end-to-end fulfillment of supplied natural-language requirements is not automatically proven because structured acceptance criteria decomposition and baseline regression comparison are unavailable.",
+            ]
+            if unapproved_ids:
+                unverified_reqs.append(
+                    f"Proposed scenario(s) not selected during human test review were not executed: {', '.join(unapproved_ids)}."
+                )
+            if not verification.verification_passed:
+                unverified_reqs.append(
+                    f"Approved scenario(s) did not achieve passing verification (outcome='{outcome.value}')."
+                )
+            legacy_trace = {
+                "requirement_traceability_status": "incomplete",
+                "structured_acceptance_criteria_status": "unavailable",
+                "criterion_mapping_status": "unavailable",
+                "requirement_verification_proven": False,
+                "baseline_regression_comparison_status": verification.baseline_comparison.status,
+                "user_supplied_requirements": run.requirements,
+                "changed_files": changed_files,
+                "impacted_modules": impacted_modules,
+                "proposed_scenario_ids": proposed_ids,
+                "human_approved_scenario_ids": approved_ids,
+                "executed_scenario_ids": executed_ids,
+                "observed_verification_outcome": outcome.value,
+                "verification_passed": verification.verification_passed,
+                "unverified_scenario_ids": unapproved_ids,
+            }
+            return [], legacy_trace, unverified_reqs
+
+        # Build explicit scenario mapping strictly from scenario.criterion_ids (never from test names)
+        scenarios_by_criterion: dict[str, list[str]] = {}
+        if gen is not None:
+            for sc in gen.scenarios:
+                for cid in sc.criterion_ids:
+                    bucket = scenarios_by_criterion.setdefault(cid, [])
+                    if sc.scenario_id not in bucket:
+                        bucket.append(sc.scenario_id)
+
+        approved_set = set(approved_ids)
+        executed_set = set(executed_ids)
+        exported_files = gen.exported_files if gen is not None else {}
+
+        # Index unresolved ambiguities (both blocking and non-blocking) per criterion
+        unresolved_by_criterion: dict[str, list[str]] = {}
+        blocking_by_criterion: dict[str, list[str]] = {}
+        ambiguity_by_id = {amb.ambiguity_id: amb for amb in req_analysis.ambiguities}
+
+        for ac in req_analysis.acceptance_criteria:
+            for amb_id in ac.ambiguity_ids:
+                amb = ambiguity_by_id.get(amb_id)
+                if amb is not None and not amb.resolved:
+                    unresolved_by_criterion.setdefault(ac.criterion_id, [])
+                    if amb_id not in unresolved_by_criterion[ac.criterion_id]:
+                        unresolved_by_criterion[ac.criterion_id].append(amb_id)
+                    if amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING:
+                        blocking_by_criterion.setdefault(ac.criterion_id, [])
+                        if amb_id not in blocking_by_criterion[ac.criterion_id]:
+                            blocking_by_criterion[ac.criterion_id].append(amb_id)
+
+        for amb in req_analysis.ambiguities:
+            if amb.resolved:
+                continue
+            for cid in amb.related_criterion_ids:
+                unresolved_by_criterion.setdefault(cid, [])
+                if amb.ambiguity_id not in unresolved_by_criterion[cid]:
+                    unresolved_by_criterion[cid].append(amb.ambiguity_id)
+                if amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING:
+                    blocking_by_criterion.setdefault(cid, [])
+                    if amb.ambiguity_id not in blocking_by_criterion[cid]:
+                        blocking_by_criterion[cid].append(amb.ambiguity_id)
+
+        # Build file failure lookup from M04 failure diagnostics
+        failure_test_names = [f.test_name for f in verification.failures]
+        has_unattributable_failure = any(
+            name in {"pytest_execution", "pytest_runner", "pytest_collection", "unknown_test"}
+            for name in failure_test_names
+        )
+
+        entries: list[RequirementTraceability] = []
+        verified_ids: list[str] = []
+        failed_ids: list[str] = []
+        unverified_ids: list[str] = []
+        needs_clarification_ids: list[str] = []
+        mandatory_ids: list[str] = []
+        incomplete_mandatory_ids: list[str] = []
+        explicit_mapping_count = 0
+
+        for ac in req_analysis.acceptance_criteria:
+            if ac.mandatory:
+                mandatory_ids.append(ac.criterion_id)
+
+            gen_scn_ids = list(scenarios_by_criterion.get(ac.criterion_id, []))
+            app_scn_ids = [sid for sid in gen_scn_ids if sid in approved_set]
+            exe_scn_ids = [sid for sid in app_scn_ids if sid in executed_set]
+            mapping_status = "explicit" if gen_scn_ids else "unavailable"
+            if mapping_status == "explicit":
+                explicit_mapping_count += 1
+
+            unresolved_ambs = list(unresolved_by_criterion.get(ac.criterion_id, []))
+            blocking_ambs = list(blocking_by_criterion.get(ac.criterion_id, []))
+
+            affected_files = list(changed_files)
+            file_map_status = "repository_scope_only" if affected_files else "unavailable"
+
+            if blocking_ambs or unresolved_ambs:
+                v_status = TraceabilityEvidenceStatus.NEEDS_CLARIFICATION
+                if blocking_ambs:
+                    ev_summary = (
+                        f"Blocked by mandatory unresolved ambiguity ({', '.join(blocking_ambs)}); "
+                        "cannot be treated as a verified requirement."
+                    )
+                else:
+                    ev_summary = (
+                        f"Linked unresolved ambiguity ({', '.join(unresolved_ambs)}) requires "
+                        "human clarification before marking criterion verified."
+                    )
+                note = "Unresolved ambiguity prevents verified status regardless of test pass/fail."
+            elif mapping_status == "unavailable":
+                v_status = TraceabilityEvidenceStatus.UNVERIFIED
+                ev_summary = (
+                    "No explicit criterion-to-scenario mapping was supplied by M03; "
+                    "passing tests are not inferred to verify this criterion."
+                )
+                note = (
+                    "Requires M03 contract extension emitting structured criterion_ids per scenario."
+                )
+            elif not exe_scn_ids:
+                v_status = TraceabilityEvidenceStatus.UNVERIFIED
+                ev_summary = (
+                    f"Mapped scenario(s) ({', '.join(gen_scn_ids)}) were not approved and executed."
+                )
+                note = "Approve and execute mapped scenarios before treating criterion as verified."
+            elif verification.verification_passed and outcome == VerificationOutcome.PASSED:
+                v_status = TraceabilityEvidenceStatus.VERIFIED
+                ev_summary = (
+                    f"Explicitly mapped scenario(s) ({', '.join(exe_scn_ids)}) approved and "
+                    f"executed with passing pytest outcome (passed={verification.passed}, failed=0)."
+                )
+                note = (
+                    "Verified against modified working copy only; baseline regression comparison "
+                    f"status is '{verification.baseline_comparison.status}'."
+                )
+            elif outcome == VerificationOutcome.FAILED_TESTS:
+                matched_failure = False
+                for sid in exe_scn_ids:
+                    exp_path = exported_files.get(sid)
+                    if exp_path and any(
+                        exp_path in tname or Path(exp_path).name in tname
+                        for tname in failure_test_names
+                    ):
+                        matched_failure = True
+                        break
+                if matched_failure or has_unattributable_failure or not failure_test_names:
+                    v_status = TraceabilityEvidenceStatus.FAILED
+                    ev_summary = (
+                        f"Mapped scenario(s) ({', '.join(exe_scn_ids)}) failed during M04 "
+                        f"verification (outcome='{outcome.value}')."
+                    )
+                    note = "Inspect M04 failure diagnostics for failing assertions."
+                else:
+                    v_status = TraceabilityEvidenceStatus.UNVERIFIED
+                    ev_summary = (
+                        f"Overall verification failed on another scenario; per-file pass confirmation "
+                        f"for ({', '.join(exe_scn_ids)}) is unavailable from aggregate M04 parser output."
+                    )
+                    note = "Cannot mark verified while verification run exited with failures."
+            else:
+                v_status = TraceabilityEvidenceStatus.UNVERIFIED
+                ev_summary = (
+                    f"Verification did not complete cleanly (outcome='{outcome.value}') for "
+                    f"mapped scenario(s) ({', '.join(exe_scn_ids)})."
+                )
+                note = "Criterion remains unverified until clean passing execution completes."
+
+            entry = RequirementTraceability(
+                criterion_id=ac.criterion_id,
+                requirement_reference=ac.requirement_reference,
+                description=ac.description,
+                origin=ac.origin,
+                mandatory=ac.mandatory,
+                affected_source_files=affected_files,
+                file_mapping_status=file_map_status,
+                generated_scenario_ids=gen_scn_ids,
+                approved_test_ids=app_scn_ids,
+                executed_test_ids=exe_scn_ids,
+                mapping_status=mapping_status,
+                execution_evidence_summary=ev_summary,
+                verification_status=v_status,
+                unresolved_ambiguity_ids=unresolved_ambs,
+                assumption_ids=list(ac.assumption_ids),
+                notes=note,
+            )
+            entries.append(entry)
+
+            if v_status == TraceabilityEvidenceStatus.VERIFIED:
+                verified_ids.append(ac.criterion_id)
+            elif v_status == TraceabilityEvidenceStatus.FAILED:
+                failed_ids.append(ac.criterion_id)
+            elif v_status == TraceabilityEvidenceStatus.NEEDS_CLARIFICATION:
+                needs_clarification_ids.append(ac.criterion_id)
+            else:
+                unverified_ids.append(ac.criterion_id)
+
+            if ac.mandatory and v_status != TraceabilityEvidenceStatus.VERIFIED:
+                incomplete_mandatory_ids.append(ac.criterion_id)
+
+        if explicit_mapping_count == 0:
+            criterion_mapping_status = "unavailable"
+        elif explicit_mapping_count == len(entries):
+            criterion_mapping_status = "explicit"
+        else:
+            criterion_mapping_status = "partial"
+
+        mandatory_coverage_complete = (
+            bool(mandatory_ids)
+            and not incomplete_mandatory_ids
+            and not req_analysis.has_mandatory_unresolved_ambiguities
+        )
+        req_traceability_status = (
+            "complete"
+            if mandatory_coverage_complete and criterion_mapping_status == "explicit"
+            else "incomplete"
+        )
+        req_verification_proven = bool(
+            mandatory_coverage_complete
+            and verification.verification_passed
+            and verification.baseline_comparison.status == "completed"
+            and not req_analysis.is_deterministic_fixture
+            and (gen is None or not gen.is_mock_output)
+        )
+
+        unverified_reqs = []
+        if req_analysis.has_mandatory_unresolved_ambiguities:
+            blocking_list = [
+                f"{amb.ambiguity_id}: {amb.description} ({amb.clarification_question})"
+                for amb in req_analysis.ambiguities
+                if (amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING)
+                and not amb.resolved
+            ]
+            unverified_reqs.append(
+                "Mandatory unresolved requirement ambiguity blocks verification: "
+                + "; ".join(blocking_list)
+            )
+        if criterion_mapping_status == "unavailable":
+            unverified_reqs.append(
+                "Structured criterion-to-test mapping is unavailable from M03; passing tests alone do not prove individual acceptance criteria are verified."
+            )
+        if incomplete_mandatory_ids:
+            unverified_reqs.append(
+                f"Mandatory acceptance criteria without verified evidence: {', '.join(incomplete_mandatory_ids)}."
+            )
+        if unapproved_ids:
+            unverified_reqs.append(
+                f"Proposed scenario(s) not selected during human test review were not executed: {', '.join(unapproved_ids)}."
+            )
+        if not verification.verification_passed:
+            unverified_reqs.append(
+                f"Approved scenario(s) did not achieve passing verification (outcome='{outcome.value}')."
+            )
+        if verification.baseline_comparison.status != "completed":
+            unverified_reqs.append(
+                "Baseline-versus-modified regression comparison was not executed; regression safety against baseline is unverified."
+            )
+
+        traceability_dict = {
+            "requirement_traceability_status": req_traceability_status,
+            "structured_acceptance_criteria_status": "available",
+            "criterion_mapping_status": criterion_mapping_status,
+            "requirement_analysis_status": req_analysis.status,
+            "requirement_analysis_mode": req_analysis.analysis_mode,
+            "requirement_analysis_is_deterministic_fixture": req_analysis.is_deterministic_fixture,
+            "has_mandatory_unresolved_ambiguities": req_analysis.has_mandatory_unresolved_ambiguities,
+            "mandatory_criteria_coverage_complete": mandatory_coverage_complete,
+            "requirement_verification_proven": req_verification_proven,
+            "baseline_regression_comparison_status": verification.baseline_comparison.status,
+            "total_criteria_count": len(entries),
+            "mandatory_criteria_count": len(mandatory_ids),
+            "verified_criterion_ids": verified_ids,
+            "failed_criterion_ids": failed_ids,
+            "unverified_criterion_ids": unverified_ids,
+            "needs_clarification_criterion_ids": needs_clarification_ids,
+            "incomplete_mandatory_criterion_ids": incomplete_mandatory_ids,
+            "user_supplied_requirements": run.requirements,
+            "changed_files": changed_files,
+            "impacted_modules": impacted_modules,
+            "proposed_scenario_ids": proposed_ids,
+            "human_approved_scenario_ids": approved_ids,
+            "executed_scenario_ids": executed_ids,
+            "observed_verification_outcome": outcome.value,
+            "verification_passed": verification.verification_passed,
+            "unverified_scenario_ids": unapproved_ids,
+        }
+        return entries, traceability_dict, unverified_reqs
+
     def _compile_change_package(
         self,
         run: WorkflowRunRecord,
@@ -1812,6 +2279,7 @@ class OrchestratorService:
         logs: list[AgentLogEntry],
     ) -> ChangePackageReport:
         """Aggregate verified run evidence into an auditable ChangePackageReport."""
+        req_analysis = run.requirement_analysis
         cb = run.codebase_analysis
         gen = run.test_generation
         review = run.test_review
@@ -1821,22 +2289,47 @@ class OrchestratorService:
         proposed_ids = [sc.scenario_id for sc in gen.scenarios] if gen else []
         approved_ids = list(review.selected_test_ids) if review and review.approved else []
         executed_ids = list(verification.executed_test_ids)
+        unapproved_ids = [sc_id for sc_id in proposed_ids if sc_id not in set(approved_ids)]
 
+        criterion_traceability, traceability, unverified_requirements = (
+            self._build_criterion_traceability(
+                run,
+                verification,
+                changed_files=changed_files,
+                impacted_modules=impacted_modules,
+                proposed_ids=proposed_ids,
+                approved_ids=approved_ids,
+                executed_ids=executed_ids,
+                unapproved_ids=unapproved_ids,
+            )
+        )
+
+        has_blocking_ambiguity = bool(
+            req_analysis is not None and req_analysis.has_mandatory_unresolved_ambiguities
+        )
         outcome = verification.verification_outcome
         if verification.verification_passed and outcome == VerificationOutcome.PASSED:
             recommendation = "needs_review"
-            recommendation_label = "ready_for_human_review"
-            mock_clause = (
-                f" Tests were produced by offline mock/stub model '{gen.model_label}' "
-                "(is_mock_output=True), not a live LLM."
-                if gen is not None and gen.is_mock_output
-                else ""
-            )
-            recommendation_summary = (
-                "All approved generated tests passed against the modified working copy. "
-                "Ready for human review; passing generated tests alone is not proof of "
-                f"full requirement verification, regression safety, or production readiness.{mock_clause}"
-            )
+            if has_blocking_ambiguity:
+                recommendation_label = "additional_review_required"
+                recommendation_summary = (
+                    "Approved generated tests passed against the modified working copy, "
+                    "but mandatory unresolved requirement ambiguities remain open. "
+                    "Ordinary approval is blocked until ambiguities are clarified."
+                )
+            else:
+                recommendation_label = "ready_for_human_review"
+                mock_clause = (
+                    f" Tests were produced by offline mock/stub model '{gen.model_label}' "
+                    "(is_mock_output=True), not a live LLM."
+                    if gen is not None and gen.is_mock_output
+                    else ""
+                )
+                recommendation_summary = (
+                    "All approved generated tests passed against the modified working copy. "
+                    "Ready for human review; passing generated tests alone is not proof of "
+                    f"full requirement verification, regression safety, or production readiness.{mock_clause}"
+                )
         elif outcome == VerificationOutcome.FAILED_TESTS:
             recommendation = "reject"
             recommendation_label = "verification_failed"
@@ -1864,9 +2357,26 @@ class OrchestratorService:
 
         limitations: list[str] = [
             "Baseline-versus-modified regression comparison was not executed; passing generated tests on the modified working copy alone does not guarantee complete regression safety.",
-            "Structured requirement decomposition (A1), automated patch generation (A4), independent adversarial review (A6), and code coverage measurement are not executed in this M02 MVP.",
+            "Automated patch generation (A4), independent adversarial review (A6), and code coverage measurement are not executed in this M02 MVP.",
             "Reviewer identity labels are unauthenticated local MVP inputs and do not constitute cryptographic or SSO identity proof.",
         ]
+        if req_analysis is None:
+            limitations.append(
+                "Structured requirement decomposition (A1) was not executed for this run record."
+            )
+        else:
+            if req_analysis.is_deterministic_fixture:
+                limitations.append(
+                    f"Structured requirement analysis (A1) was produced by an offline deterministic fixture ('{req_analysis.model_label}', is_deterministic_fixture=True), not a live LLM."
+                )
+            if traceability.get("criterion_mapping_status") == "unavailable":
+                limitations.append(
+                    "M03 RegressionTestGenerationAgent does not yet return structured criterion_ids per scenario; criterion-to-test mappings are unavailable and not inferred from test names."
+                )
+            if has_blocking_ambiguity:
+                limitations.append(
+                    "Mandatory unresolved requirement ambiguities remain open; affected acceptance criteria are marked needs_clarification."
+                )
         if gen is not None and gen.is_mock_output:
             limitations.append(
                 f"Proposed tests were produced by an offline mock/stub model ('{gen.model_label}', is_mock_output=True) and must not be presented as live LLM performance."
@@ -1877,35 +2387,6 @@ class OrchestratorService:
             limitations.append("AI root-cause analysis is unavailable (deterministic keyword diagnostics only).")
         if outcome == VerificationOutcome.UNAVAILABLE and verification.error is not None:
             limitations.append(f"Verification unavailable: {verification.error.message}")
-
-        unverified_requirements: list[str] = [
-            "Full end-to-end fulfillment of supplied natural-language requirements is not automatically proven because structured acceptance criteria decomposition and baseline regression comparison are unavailable.",
-        ]
-        unapproved_ids = [sc_id for sc_id in proposed_ids if sc_id not in set(approved_ids)]
-        if unapproved_ids:
-            unverified_requirements.append(
-                f"Proposed scenario(s) not selected during human test review were not executed: {', '.join(unapproved_ids)}."
-            )
-        if not verification.verification_passed:
-            unverified_requirements.append(
-                f"Approved scenario(s) did not achieve passing verification (outcome='{outcome.value}')."
-            )
-
-        traceability = {
-            "requirement_traceability_status": "incomplete",
-            "structured_acceptance_criteria_status": "unavailable",
-            "requirement_verification_proven": False,
-            "baseline_regression_comparison_status": verification.baseline_comparison.status,
-            "user_supplied_requirements": run.requirements,
-            "changed_files": changed_files,
-            "impacted_modules": impacted_modules,
-            "proposed_scenario_ids": proposed_ids,
-            "human_approved_scenario_ids": approved_ids,
-            "executed_scenario_ids": executed_ids,
-            "observed_verification_outcome": outcome.value,
-            "verification_passed": verification.verification_passed,
-            "unverified_scenario_ids": unapproved_ids,
-        }
 
         comm_summary = [
             {
@@ -1939,6 +2420,7 @@ class OrchestratorService:
             impacted_modules=impacted_modules,
             approved_scenario_ids=approved_ids,
             executed_scenario_ids=executed_ids,
+            requirement_analysis=req_analysis,
             codebase_analysis=cb,
             test_generation=gen,
             verification=verification,
@@ -1947,6 +2429,7 @@ class OrchestratorService:
             recommendation_label=recommendation_label,
             recommendation_summary=recommendation_summary,
             unverified_requirements=unverified_requirements,
+            criterion_traceability=criterion_traceability,
             traceability=traceability,
             agent_communication_summary=comm_summary,
             evidence_limitations=limitations,
@@ -1991,6 +2474,24 @@ class OrchestratorService:
                     "Submit 'needs_review' or 'reject' instead.",
                     code="VERIFICATION_APPROVAL_BLOCKED",
                     details={"verification_outcome": outcome_val},
+                    run_id=run_id,
+                )
+            if (
+                run.requirement_analysis is not None
+                and run.requirement_analysis.has_mandatory_unresolved_ambiguities
+            ):
+                blocking_ids = [
+                    amb.ambiguity_id
+                    for amb in run.requirement_analysis.ambiguities
+                    if (amb.mandatory_to_resolve or amb.severity == AmbiguitySeverity.BLOCKING)
+                    and not amb.resolved
+                ]
+                raise ReviewConflictError(
+                    "Cannot approve a change package while mandatory unresolved requirement "
+                    f"ambiguities remain open ({', '.join(blocking_ids)}). "
+                    "Submit 'needs_review' or 'reject' instead.",
+                    code="UNRESOLVED_REQUIREMENT_AMBIGUITY",
+                    details={"unresolved_ambiguity_ids": blocking_ids},
                     run_id=run_id,
                 )
 

@@ -116,6 +116,17 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             for rec in run.agent_records
         ]
 
+    if run.requirement_analysis is not None:
+        updates["requirement_analysis"] = run.requirement_analysis.model_copy(
+            update={
+                "requirement_summary": redact_secrets(
+                    run.requirement_analysis.requirement_summary
+                ),
+                "error": _sanitize_error(run.requirement_analysis.error),
+                "notes": [redact_secrets(note) for note in run.requirement_analysis.notes],
+            }
+        )
+
     if run.codebase_analysis is not None and run.codebase_analysis.error is not None:
         updates["codebase_analysis"] = run.codebase_analysis.model_copy(
             update={"error": _sanitize_error(run.codebase_analysis.error)}
@@ -124,6 +135,22 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
     if run.test_generation is not None and run.test_generation.error is not None:
         updates["test_generation"] = run.test_generation.model_copy(
             update={"error": _sanitize_error(run.test_generation.error)}
+        )
+
+    if run.report is not None and run.report.requirement_analysis is not None:
+        req_rep = run.report.requirement_analysis
+        updates["report"] = run.report.model_copy(
+            update={
+                "requirement_analysis": req_rep.model_copy(
+                    update={
+                        "requirement_summary": redact_secrets(
+                            req_rep.requirement_summary
+                        ),
+                        "error": _sanitize_error(req_rep.error),
+                        "notes": [redact_secrets(note) for note in req_rep.notes],
+                    }
+                )
+            }
         )
 
     if run.verification is not None:

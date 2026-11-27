@@ -17,10 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from project.marsadh_orchestrator.store import redact_nested_secrets, redact_secrets
 from project.schemas import (
+    AcceptanceCriterion,
     AgentError,
     AgentExecutionRecord,
     AgentLogEntry,
     BaselineComparisonEvidence,
+    BusinessConstraint,
     ChangedFileImpact,
     ChangePackageReport,
     CodebaseAnalysisResult,
@@ -28,6 +30,10 @@ from project.schemas import (
     FailureDiagnostic,
     GeneratedTestScenario,
     HumanDecisionRecord,
+    RequirementAmbiguity,
+    RequirementAnalysisResult,
+    RequirementAssumption,
+    RequirementTraceability,
     RiskSummary,
     TestGenerationResult,
     TestReviewRecord,
@@ -92,6 +98,28 @@ class RepositorySummaryResponse(BaseModel):
     base_ref: str
     resolved_base_commit: str | None = None
     change_mode: Literal["working_tree", "committed_range", "unknown"] = "unknown"
+
+
+class RequirementAnalysisResponse(BaseModel):
+    """Normalized A1 structured requirement analysis view for dashboard consumption."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "needs_clarification", "error"]
+    analysis_mode: Literal["offline_test", "live_llm"]
+    is_deterministic_fixture: bool
+    is_mock_output: bool
+    model_label: str
+    requirement_summary: str = ""
+    acceptance_criteria: list[AcceptanceCriterion] = Field(default_factory=list)
+    business_constraints: list[BusinessConstraint] = Field(default_factory=list)
+    assumptions: list[RequirementAssumption] = Field(default_factory=list)
+    ambiguities: list[RequirementAmbiguity] = Field(default_factory=list)
+    preserved_behaviors: list[str] = Field(default_factory=list)
+    edge_cases: list[str] = Field(default_factory=list)
+    has_mandatory_unresolved_ambiguities: bool = False
+    error: AgentError | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class CodebaseAnalysisResponse(BaseModel):
@@ -186,6 +214,7 @@ class ChangePackageResponse(BaseModel):
     impacted_modules: list[str] = Field(default_factory=list)
     approved_scenario_ids: list[str] = Field(default_factory=list)
     executed_scenario_ids: list[str] = Field(default_factory=list)
+    requirement_analysis: RequirementAnalysisResponse | None = None
     risk_summary: RiskSummary = Field(default_factory=RiskSummary)
     recommendation: Literal["approve", "reject", "needs_review", "no_changes"]
     recommendation_label: Literal[
@@ -197,6 +226,7 @@ class ChangePackageResponse(BaseModel):
     ]
     recommendation_summary: str = ""
     unverified_requirements: list[str] = Field(default_factory=list)
+    criterion_traceability: list[RequirementTraceability] = Field(default_factory=list)
     traceability: dict[str, Any] = Field(default_factory=dict)
     agent_communication_summary: list[dict[str, Any]] = Field(default_factory=list)
     evidence_limitations: list[str] = Field(default_factory=list)
@@ -215,6 +245,8 @@ class RunSummaryResponse(BaseModel):
     requirements_preview: str
     created_at: datetime
     updated_at: datetime
+    acceptance_criteria_count: int = 0
+    has_unresolved_ambiguities: bool = False
     changed_file_count: int = 0
     proposed_scenario_count: int = 0
     verification_outcome: VerificationOutcome | None = None
@@ -250,6 +282,7 @@ class RunDetailResponse(BaseModel):
     updated_at: datetime
     allowed_actions: list[str] = Field(default_factory=list)
     agent_records: list[AgentExecutionRecord] = Field(default_factory=list)
+    requirement_analysis: RequirementAnalysisResponse | None = None
     codebase_analysis: CodebaseAnalysisResponse | None = None
     test_generation: TestGenerationResponse | None = None
     test_review: TestReviewRecord | None = None
@@ -285,10 +318,46 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
     if run.state == WorkflowState.AWAITING_TEST_REVIEW:
         return ["submit_test_review"]
     if run.state == WorkflowState.AWAITING_FINAL_APPROVAL:
-        if run.verification is not None and run.verification.verification_passed:
-            return ["submit_final_decision:approve", "submit_final_decision:reject", "submit_final_decision:needs_review"]
+        has_blocking_ambiguity = bool(
+            run.requirement_analysis is not None
+            and run.requirement_analysis.has_mandatory_unresolved_ambiguities
+        )
+        if (
+            run.verification is not None
+            and run.verification.verification_passed
+            and not has_blocking_ambiguity
+        ):
+            return [
+                "submit_final_decision:approve",
+                "submit_final_decision:reject",
+                "submit_final_decision:needs_review",
+            ]
         return ["submit_final_decision:reject", "submit_final_decision:needs_review"]
     return []
+
+
+def _to_requirement_analysis_response(
+    req: RequirementAnalysisResult | None,
+) -> RequirementAnalysisResponse | None:
+    if req is None:
+        return None
+    return RequirementAnalysisResponse(
+        status=req.status,
+        analysis_mode=req.analysis_mode,
+        is_deterministic_fixture=req.is_deterministic_fixture,
+        is_mock_output=req.is_mock_output,
+        model_label=req.model_label,
+        requirement_summary=redact_secrets(req.requirement_summary),
+        acceptance_criteria=list(req.acceptance_criteria),
+        business_constraints=list(req.business_constraints),
+        assumptions=list(req.assumptions),
+        ambiguities=list(req.ambiguities),
+        preserved_behaviors=list(req.preserved_behaviors),
+        edge_cases=list(req.edge_cases),
+        has_mandatory_unresolved_ambiguities=req.has_mandatory_unresolved_ambiguities,
+        error=_sanitize_error(req.error),
+        notes=[redact_secrets(note) for note in req.notes],
+    )
 
 
 def _sanitize_error(error: AgentError | None) -> AgentError | None:
@@ -402,11 +471,15 @@ def _to_report_response(
         impacted_modules=list(report.impacted_modules),
         approved_scenario_ids=list(report.approved_scenario_ids),
         executed_scenario_ids=list(report.executed_scenario_ids),
+        requirement_analysis=_to_requirement_analysis_response(
+            report.requirement_analysis
+        ),
         risk_summary=report.risk_summary,
         recommendation=report.recommendation,
         recommendation_label=report.recommendation_label,
         recommendation_summary=report.recommendation_summary,
         unverified_requirements=list(report.unverified_requirements),
+        criterion_traceability=list(report.criterion_traceability),
         traceability=dict(report.traceability),
         agent_communication_summary=list(report.agent_communication_summary),
         evidence_limitations=list(report.evidence_limitations),
@@ -438,6 +511,16 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
         requirements_preview=preview,
         created_at=run.created_at,
         updated_at=run.updated_at,
+        acceptance_criteria_count=(
+            len(run.requirement_analysis.acceptance_criteria)
+            if run.requirement_analysis
+            else 0
+        ),
+        has_unresolved_ambiguities=(
+            run.requirement_analysis.has_mandatory_unresolved_ambiguities
+            if run.requirement_analysis
+            else False
+        ),
         changed_file_count=(
             len(run.codebase_analysis.changed_files_repo_relative)
             if run.codebase_analysis
@@ -487,6 +570,9 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
             )
             for rec in run.agent_records
         ],
+        requirement_analysis=_to_requirement_analysis_response(
+            run.requirement_analysis
+        ),
         codebase_analysis=_to_codebase_response(run.codebase_analysis),
         test_generation=_to_test_generation_response(run.test_generation),
         test_review=run.test_review,

@@ -29,6 +29,7 @@ from .agents import (
     VerificationResult,
     utc_now,
 )
+from .requirements import RequirementAnalysisResult
 
 SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SAFE_GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/@^~{}][A-Za-z0-9._/@^~{}-]{0,199}$")
@@ -39,6 +40,7 @@ class WorkflowState(str, Enum):
     """Deterministic workflow lifecycle states for M02 orchestration."""
 
     CREATED = "CREATED"
+    ANALYZING_REQUIREMENTS = "ANALYZING_REQUIREMENTS"
     ANALYZING_CODEBASE = "ANALYZING_CODEBASE"
     GENERATING_TESTS = "GENERATING_TESTS"
     AWAITING_TEST_REVIEW = "AWAITING_TEST_REVIEW"
@@ -290,6 +292,7 @@ class WorkflowRunRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     agent_records: list[AgentExecutionRecord] = Field(default_factory=list)
+    requirement_analysis: RequirementAnalysisResult | None = None
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     test_review: TestReviewRecord | None = None

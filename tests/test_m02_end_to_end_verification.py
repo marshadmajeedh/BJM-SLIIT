@@ -40,7 +40,11 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from project.main import create_app
-from project.marsadh_orchestrator import OrchestratorConfig, RunStore
+from project.marsadh_orchestrator import (
+    OrchestratorConfig,
+    RunStore,
+    deterministic_offline_requirement_analyzer,
+)
 from project.marsadh_orchestrator.orchestrator import default_offline_model_stub
 from project.schemas import (
     ExecutionMode,
@@ -393,7 +397,8 @@ def test_real_http_end_to_end_scenario_a_correct_and_scenario_b_regressive(tmp_p
             assert rep_a["recommendation_label"] == "ready_for_human_review"
             assert "is_mock_output=True" in rep_a["recommendation_summary"]
             assert rep_a["traceability"]["requirement_traceability_status"] == "incomplete"
-            assert rep_a["traceability"]["structured_acceptance_criteria_status"] == "unavailable"
+            assert rep_a["traceability"]["structured_acceptance_criteria_status"] == "available"
+            assert rep_a["traceability"]["criterion_mapping_status"] == "unavailable"
             assert rep_a["traceability"]["requirement_verification_proven"] is False
             assert rep_a["traceability"]["baseline_regression_comparison_status"] == "unavailable"
             assert rep_a["traceability"]["user_supplied_requirements"] == REQUIREMENT_TEXT
@@ -810,7 +815,12 @@ def test_live_groq_wiring_no_silent_fallback_and_nested_secret_redaction(
         _fake_groq_generate,
     )
 
-    app = create_app(cfg, offline_model_callable=default_offline_model_stub)
+    app = create_app(
+        cfg,
+        requirement_live_callable=deterministic_offline_requirement_analyzer,
+        requirement_live_label=f"groq:{model_name}",
+        offline_model_callable=default_offline_model_stub,
+    )
     with TestClient(app) as client:
         health = client.get("/health").json()
         assert health["live_llm_configured"] is True
