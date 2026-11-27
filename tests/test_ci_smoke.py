@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+import subprocess
 import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -172,7 +173,26 @@ def test_pr_template_and_ci_documentation_exist() -> None:
 
 def test_no_committed_secrets_or_env_files() -> None:
     findings: list[str] = []
-    for path in sorted(REPO_ROOT.rglob("*")):
+    if (REPO_ROOT / ".git").exists():
+        # Local ignored files (especially .env) are not committed content.
+        result = subprocess.run(
+            [
+                "git", "-c", f"safe.directory={REPO_ROOT.as_posix()}",
+                "ls-files", "-z",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        )
+        paths = [
+            REPO_ROOT / name.decode("utf-8")
+            for name in result.stdout.split(b"\0") if name
+        ]
+    else:
+        # Source archives contain the exported repository files without .git.
+        paths = list(REPO_ROOT.rglob("*"))
+
+    for path in sorted(paths):
         if not path.is_file():
             continue
         if any(part in EXCLUDED_DIRS for part in path.parts):
