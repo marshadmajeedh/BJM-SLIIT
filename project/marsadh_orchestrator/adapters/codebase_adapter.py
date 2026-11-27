@@ -25,9 +25,19 @@ from project.schemas.agents import (
     CodebaseAnalysisResult,
     ImpactedFile,
 )
+from project.schemas.patch import (
+    PreChangeCodebaseContext,
+    PreChangeFileSummary,
+)
 
 _SAFE_GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/@^~{}][A-Za-z0-9._/@^~{}-]{0,199}$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
+_PRE_CHANGE_MAX_FILES = 20
+_PRE_CHANGE_MAX_FILE_BYTES = 32_768
+_PRE_CHANGE_MAX_TOTAL_BYTES = 131_072
+_PRE_CHANGE_SENSITIVE_NAMES = frozenset(
+    {".env", "id_rsa", "id_ed25519", "secrets.py", "credentials.py"}
+)
 
 
 def _normalize_source_path(source_path: str) -> str:
@@ -405,3 +415,272 @@ class CodebaseAdapter:
                 "M01 static reverse-dependency analysis resolves absolute Python imports only; dynamic or relative imports may not appear.",
             ],
         )
+
+    def collect_pre_change_context(
+        self,
+        repository_path: str | Path,
+        source_path: str = ".",
+        base_ref: str = "HEAD",
+        *,
+        target_modules: list[str] | None = None,
+        max_files: int = _PRE_CHANGE_MAX_FILES,
+        max_file_bytes: int = _PRE_CHANGE_MAX_FILE_BYTES,
+        max_total_bytes: int = _PRE_CHANGE_MAX_TOTAL_BYTES,
+    ) -> tuple[PreChangeCodebaseContext, dict[str, str]]:
+        """Collect available pre-change static repository context for A4 without requiring a Git diff.
+
+        Uses M01's ``analyze_repository`` for static AST indexing of Python files
+        under ``source_path`` and returns bounded, non-sensitive source file
+        contents separately so raw file contents are not leaked into public API
+        responses. Explicitly declares ``pre_change_impact_prediction_available=False``
+        because M01's impact engine is diff-driven.
+        """
+        git_timeout = self.config.git_timeout_seconds if self.config else 30
+
+        def _unavailable(
+            *,
+            norm_src: str,
+            ref_str: str,
+            code: str,
+            message: str,
+            resolved_commit: str | None = None,
+        ) -> tuple[PreChangeCodebaseContext, dict[str, str]]:
+            return (
+                PreChangeCodebaseContext(
+                    status="unavailable",
+                    scope="unavailable",
+                    pre_change_impact_prediction_available=False,
+                    source_path=norm_src,
+                    base_ref=ref_str,
+                    resolved_base_commit=resolved_commit,
+                    total_indexed_files=0,
+                    limitation_notes=[
+                        "Pre-change codebase context is unavailable; cannot proceed with patch generation.",
+                    ],
+                    error=AgentError(code=code, message=message),
+                ),
+                {},
+            )
+
+        try:
+            norm_source = _normalize_source_path(source_path)
+        except ValueError as exc:
+            return _unavailable(
+                norm_src=source_path or ".",
+                ref_str=base_ref or "HEAD",
+                code="INVALID_SOURCE_PATH",
+                message=str(exc),
+            )
+
+        try:
+            clean_base_ref = _validate_base_ref(base_ref)
+        except ValueError as exc:
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=base_ref or "HEAD",
+                code="INVALID_GIT_REF",
+                message=str(exc),
+            )
+
+        raw_repo = Path(repository_path)
+        if not raw_repo.exists() or not raw_repo.is_dir():
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=f"Repository directory does not exist: '{repository_path}'",
+            )
+        repo_resolved = raw_repo.resolve(strict=True)
+        if not self._is_path_permitted(repo_resolved):
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="REPOSITORY_NOT_ALLOWED",
+                message=f"Repository '{repo_resolved}' is outside permitted roots",
+            )
+
+        source_candidate = (
+            repo_resolved if norm_source == "." else (repo_resolved / norm_source)
+        )
+        if source_candidate.is_symlink() and not source_candidate.resolve().is_relative_to(
+            repo_resolved
+        ):
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="SYMLINK_ESCAPE",
+                message=f"source_path symlink escapes repository root: '{norm_source}'",
+            )
+        if not source_candidate.exists() or not source_candidate.is_dir():
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=f"Source directory '{norm_source}' not found in repository",
+            )
+        source_resolved = source_candidate.resolve(strict=True)
+        if not source_resolved.is_relative_to(repo_resolved):
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="SOURCE_PATH_ESCAPE",
+                message=f"Source directory '{norm_source}' escapes repository root",
+            )
+
+        try:
+            ref_proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_resolved),
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{clean_base_ref}^{{commit}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=git_timeout,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=f"Failed to resolve Git base ref '{clean_base_ref}': {exc}",
+            )
+        if ref_proc.returncode != 0:
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                code="INVALID_GIT_REF",
+                message=(
+                    f"Invalid Git repository or base_ref '{clean_base_ref}': "
+                    f"{(ref_proc.stderr or '').strip()}"
+                ),
+            )
+        resolved_base_commit = ref_proc.stdout.strip()
+
+        try:
+            raw_repo_analysis = analyze_repository(str(source_resolved))
+        except Exception as exc:  # noqa: BLE001
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                resolved_commit=resolved_base_commit,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=f"M01 static repository indexing failed: {exc}",
+            )
+
+        raw_files = (
+            raw_repo_analysis.get("files", [])
+            if isinstance(raw_repo_analysis, dict)
+            else []
+        )
+        if not isinstance(raw_files, list) or not raw_files:
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                resolved_commit=resolved_base_commit,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=(
+                    f"No indexable Python source files found under source_path='{norm_source}'."
+                ),
+            )
+
+        indexed_summaries: list[PreChangeFileSummary] = []
+        indexed_repo_paths: list[str] = []
+        candidate_files: list[tuple[int, str, Path]] = []
+        hint_tokens = {tok.strip().lower() for tok in (target_modules or []) if tok.strip()}
+
+        for item in raw_files:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            src_rel = str(item["path"]).replace("\\", "/")
+            file_candidate = source_resolved / src_rel
+            if file_candidate.is_symlink():
+                continue
+            try:
+                file_abs = file_candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if not file_abs.is_relative_to(source_resolved) or not file_abs.is_file():
+                continue
+
+            fname_lower = file_abs.name.lower()
+            if (
+                fname_lower in _PRE_CHANGE_SENSITIVE_NAMES
+                or fname_lower.startswith(".env")
+                or fname_lower.endswith((".pem", ".key"))
+            ):
+                continue
+
+            repo_rel = file_abs.relative_to(repo_resolved).as_posix()
+            indexed_repo_paths.append(repo_rel)
+            indexed_summaries.append(
+                PreChangeFileSummary(
+                    repo_relative_path=repo_rel,
+                    source_relative_path=src_rel,
+                    functions=[str(fn) for fn in item.get("functions", []) if isinstance(fn, str)],
+                    classes=[str(cl) for cl in item.get("classes", []) if isinstance(cl, str)],
+                    imports=[str(im) for im in item.get("imports", []) if isinstance(im, str)],
+                    parse_error=str(item["error"])[:1000] if item.get("error") else None,
+                )
+            )
+
+            stem_lower = file_abs.stem.lower()
+            priority = 0 if (hint_tokens and stem_lower in hint_tokens) else 1
+            candidate_files.append((priority, repo_rel, file_abs))
+
+        if not indexed_summaries:
+            return _unavailable(
+                norm_src=norm_source,
+                ref_str=clean_base_ref,
+                resolved_commit=resolved_base_commit,
+                code="PRE_CHANGE_CONTEXT_UNAVAILABLE",
+                message=(
+                    f"No safe, non-sensitive Python source files could be indexed under '{norm_source}'."
+                ),
+            )
+
+        relevant_sources: dict[str, str] = {}
+        total_bytes = 0
+        for _prio, repo_rel, file_abs in sorted(
+            candidate_files, key=lambda entry: (entry[0], entry[1])
+        ):
+            if len(relevant_sources) >= max_files:
+                break
+            try:
+                raw_bytes = file_abs.read_bytes()
+            except OSError:
+                continue
+            if len(raw_bytes) > max_file_bytes or total_bytes + len(raw_bytes) > max_total_bytes:
+                continue
+            try:
+                text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            relevant_sources[repo_rel] = text
+            total_bytes += len(raw_bytes)
+
+        limitation_notes = [
+            "Pre-change codebase context is limited to static AST file/symbol indexing from M01 analyze_repository.",
+            "Current M01 impact analysis (run_codebase_agent) is diff-driven and does not provide pre-change impact prediction; full reverse-dependency impact analysis executes after patch application.",
+            f"Provided {len(relevant_sources)} bounded non-sensitive source file(s) under source_path='{norm_source}' to A4.",
+        ]
+
+        context = PreChangeCodebaseContext(
+            status="completed",
+            scope="static_repository_index_only",
+            pre_change_impact_prediction_available=False,
+            source_path=norm_source,
+            base_ref=clean_base_ref,
+            resolved_base_commit=resolved_base_commit,
+            total_indexed_files=len(indexed_summaries),
+            indexed_file_paths=sorted(indexed_repo_paths),
+            indexed_files=indexed_summaries,
+            relevant_file_paths=sorted(relevant_sources.keys()),
+            limitation_notes=limitation_notes,
+        )
+        return context, relevant_sources

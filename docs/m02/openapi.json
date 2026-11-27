@@ -940,6 +940,11 @@
             "title": "Change Mode",
             "default": "unknown"
           },
+          "workflow_mode": {
+            "type": "string",
+            "title": "Workflow Mode",
+            "default": "verify_existing_change"
+          },
           "execution_mode": {
             "type": "string",
             "title": "Execution Mode",
@@ -966,6 +971,61 @@
               }
             ],
             "title": "Is Mock Output"
+          },
+          "patch_proposal_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Proposal Sha256"
+          },
+          "patch_is_deterministic_fixture": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Is Deterministic Fixture"
+          },
+          "patch_applied": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Applied"
+          },
+          "original_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Source Snapshot Sha256"
+          },
+          "resulting_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Source Snapshot Sha256"
           },
           "changed_files": {
             "items": {
@@ -1312,6 +1372,10 @@
             "minLength": 1,
             "title": "Requirements"
           },
+          "workflow_mode": {
+            "$ref": "#/components/schemas/WorkflowMode",
+            "default": "verify_existing_change"
+          },
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode",
             "default": "offline_test"
@@ -1333,6 +1397,10 @@
           },
           "state": {
             "$ref": "#/components/schemas/WorkflowState"
+          },
+          "workflow_mode": {
+            "$ref": "#/components/schemas/WorkflowMode",
+            "default": "verify_existing_change"
           },
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode"
@@ -1611,6 +1679,18 @@
             ],
             "title": "Groq Model"
           },
+          "patch_generator_configured": {
+            "type": "boolean",
+            "title": "Patch Generator Configured",
+            "default": false
+          },
+          "supported_workflow_modes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Supported Workflow Modes"
+          },
           "verification_dependencies_available": {
             "type": "boolean",
             "title": "Verification Dependencies Available"
@@ -1804,6 +1884,619 @@
         ],
         "title": "ImpactedFile",
         "description": "Normalized downstream module impacted by a changed Python file."
+      },
+      "PatchApplicationResponse": {
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "title": "Applied"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "failed",
+              "reverted"
+            ],
+            "title": "Status"
+          },
+          "patch_sha256": {
+            "type": "string",
+            "title": "Patch Sha256"
+          },
+          "original_source_snapshot_sha256": {
+            "type": "string",
+            "title": "Original Source Snapshot Sha256"
+          },
+          "original_git_diff_sha256": {
+            "type": "string",
+            "title": "Original Git Diff Sha256"
+          },
+          "resulting_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Source Snapshot Sha256"
+          },
+          "resulting_git_diff_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Git Diff Sha256"
+          },
+          "applied_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Applied Files"
+          },
+          "rollback_performed": {
+            "type": "boolean",
+            "title": "Rollback Performed",
+            "default": false
+          },
+          "workspace_clean_after_rollback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Clean After Rollback"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "applied_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Applied At"
+          },
+          "isolation_note": {
+            "type": "string",
+            "title": "Isolation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "applied",
+          "status",
+          "patch_sha256",
+          "original_source_snapshot_sha256",
+          "original_git_diff_sha256",
+          "applied_at",
+          "isolation_note"
+        ],
+        "title": "PatchApplicationResponse",
+        "description": "Safe patch application evidence view preserving original and resulting snapshots."
+      },
+      "PatchFileChange": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "change_type": {
+            "type": "string",
+            "enum": [
+              "modify",
+              "add",
+              "delete",
+              "rename"
+            ],
+            "title": "Change Type",
+            "default": "modify"
+          },
+          "old_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Path"
+          },
+          "added_lines": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Added Lines",
+            "default": 0
+          },
+          "removed_lines": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Removed Lines",
+            "default": 0
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Summary",
+            "default": ""
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "PatchFileChange",
+        "description": "Metadata describing a single file modified by a proposed patch."
+      },
+      "PatchGenerationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "unavailable",
+              "blocked",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "attempt_number": {
+            "type": "integer",
+            "title": "Attempt Number",
+            "default": 1
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchProposalResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_metadata": {
+            "$ref": "#/components/schemas/PatchModelMetadata"
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture",
+            "default": false
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output",
+            "default": false
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "model_metadata"
+        ],
+        "title": "PatchGenerationResponse",
+        "description": "Sanitized A4 patch generation view with explicit fixture/mock indicators."
+      },
+      "PatchModelMetadata": {
+        "properties": {
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "model_label": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Model Label",
+            "default": "unconfigured"
+          },
+          "generation_mode": {
+            "type": "string",
+            "enum": [
+              "offline_test",
+              "live_llm"
+            ],
+            "title": "Generation Mode",
+            "default": "offline_test"
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture",
+            "default": false
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output",
+            "default": false
+          },
+          "token_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Usage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PatchModelMetadata",
+        "description": "Non-fabricated provider and model provenance for a patch generation call."
+      },
+      "PatchProposalResponse": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "title": "Proposal Id"
+          },
+          "patch_sha256": {
+            "type": "string",
+            "title": "Patch Sha256"
+          },
+          "unified_diff": {
+            "type": "string",
+            "title": "Unified Diff"
+          },
+          "affected_files": {
+            "items": {
+              "$ref": "#/components/schemas/PatchFileChange"
+            },
+            "type": "array",
+            "title": "Affected Files"
+          },
+          "change_rationale": {
+            "type": "string",
+            "title": "Change Rationale"
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          },
+          "risk_indicators": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Risk Indicators"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "patch_sha256",
+          "unified_diff",
+          "change_rationale"
+        ],
+        "title": "PatchProposalResponse",
+        "description": "Safe reviewable patch proposal view for dashboard inspection."
+      },
+      "PatchValidationResponse": {
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "patch_sha256": {
+            "type": "string",
+            "title": "Patch Sha256"
+          },
+          "expected_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Snapshot Sha256"
+          },
+          "checked_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Checked Files"
+          },
+          "patch_size_bytes": {
+            "type": "integer",
+            "title": "Patch Size Bytes",
+            "default": 0
+          },
+          "changed_file_count": {
+            "type": "integer",
+            "title": "Changed File Count",
+            "default": 0
+          },
+          "git_apply_check_passed": {
+            "type": "boolean",
+            "title": "Git Apply Check Passed",
+            "default": false
+          },
+          "checks_passed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Checks Passed"
+          },
+          "violations": {
+            "items": {
+              "$ref": "#/components/schemas/AgentError"
+            },
+            "type": "array",
+            "title": "Violations"
+          },
+          "validated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Validated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "valid",
+          "status",
+          "patch_sha256",
+          "validated_at"
+        ],
+        "title": "PatchValidationResponse",
+        "description": "Safe patch validation evidence view."
+      },
+      "PreChangeContextResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "unavailable",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "static_repository_index_only",
+              "unavailable"
+            ],
+            "title": "Scope"
+          },
+          "pre_change_impact_prediction_available": {
+            "type": "boolean",
+            "const": false,
+            "title": "Pre Change Impact Prediction Available",
+            "default": false
+          },
+          "source_path": {
+            "type": "string",
+            "title": "Source Path"
+          },
+          "base_ref": {
+            "type": "string",
+            "title": "Base Ref"
+          },
+          "resolved_base_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Base Commit"
+          },
+          "total_indexed_files": {
+            "type": "integer",
+            "title": "Total Indexed Files",
+            "default": 0
+          },
+          "indexed_file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Indexed File Paths"
+          },
+          "indexed_files": {
+            "items": {
+              "$ref": "#/components/schemas/PreChangeFileSummary"
+            },
+            "type": "array",
+            "title": "Indexed Files"
+          },
+          "relevant_file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Relevant File Paths"
+          },
+          "limitation_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitation Notes"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "scope",
+          "source_path",
+          "base_ref"
+        ],
+        "title": "PreChangeContextResponse",
+        "description": "Safe pre-change repository context summary excluding host paths and raw source code."
+      },
+      "PreChangeFileSummary": {
+        "properties": {
+          "repo_relative_path": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Repo Relative Path"
+          },
+          "source_relative_path": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Relative Path"
+          },
+          "functions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Functions"
+          },
+          "classes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Classes"
+          },
+          "imports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Imports"
+          },
+          "parse_error": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parse Error"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "repo_relative_path",
+          "source_relative_path"
+        ],
+        "title": "PreChangeFileSummary",
+        "description": "Static AST summary of a single indexed Python file before patch generation."
       },
       "RepositorySummaryResponse": {
         "properties": {
@@ -2253,6 +2946,10 @@
           "state": {
             "$ref": "#/components/schemas/WorkflowState"
           },
+          "workflow_mode": {
+            "$ref": "#/components/schemas/WorkflowMode",
+            "default": "verify_existing_change"
+          },
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode"
           },
@@ -2262,6 +2959,28 @@
           },
           "repository": {
             "$ref": "#/components/schemas/RepositorySummaryResponse"
+          },
+          "original_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Source Snapshot Sha256"
+          },
+          "original_git_diff_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Git Diff Sha256"
           },
           "source_snapshot_sha256": {
             "anyOf": [
@@ -2284,6 +3003,28 @@
               }
             ],
             "title": "Git Diff Sha256"
+          },
+          "patch_proposal_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Proposal Sha256"
+          },
+          "patch_attempt_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Attempt Number"
           },
           "created_at": {
             "type": "string",
@@ -2313,6 +3054,46 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/RequirementAnalysisResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pre_change_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreChangeContextResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "patch_generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchGenerationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "patch_validation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchValidationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "patch_application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchApplicationResponse"
               },
               {
                 "type": "null"
@@ -2484,6 +3265,10 @@
           "state": {
             "$ref": "#/components/schemas/WorkflowState"
           },
+          "workflow_mode": {
+            "$ref": "#/components/schemas/WorkflowMode",
+            "default": "verify_existing_change"
+          },
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode"
           },
@@ -2513,6 +3298,28 @@
             "type": "boolean",
             "title": "Has Unresolved Ambiguities",
             "default": false
+          },
+          "patch_applied": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Applied"
+          },
+          "patch_attempt_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Attempt Number"
           },
           "changed_file_count": {
             "type": "integer",
@@ -2992,12 +3799,26 @@
         "title": "VerificationStrategy",
         "description": "Expected verification method for an acceptance criterion."
       },
+      "WorkflowMode": {
+        "type": "string",
+        "enum": [
+          "verify_existing_change",
+          "generate_and_verify_change"
+        ],
+        "title": "WorkflowMode",
+        "description": "Explicit workflow mode separating verification-only vs patch-generation runs."
+      },
       "WorkflowState": {
         "type": "string",
         "enum": [
           "CREATED",
           "ANALYZING_REQUIREMENTS",
           "ANALYZING_CODEBASE",
+          "COLLECTING_PRE_CHANGE_CONTEXT",
+          "GENERATING_PATCH",
+          "VALIDATING_PATCH",
+          "APPLYING_PATCH",
+          "ANALYZING_POST_PATCH_IMPACT",
           "GENERATING_TESTS",
           "AWAITING_TEST_REVIEW",
           "RUNNING_VERIFICATION",

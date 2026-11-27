@@ -45,6 +45,8 @@ class OrchestratorConfig(BaseModel):
     groq_model: str | None = Field(default=None, max_length=160)
     groq_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     max_repair_attempts: int = Field(default=2, ge=0, le=2)
+    max_patch_size_bytes: int = Field(default=100_000, ge=1024, le=1_000_000)
+    max_patch_changed_files: int = Field(default=10, ge=1, le=50)
     max_concurrent_runs: int = Field(default=4, ge=1, le=32)
     app_host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     app_port: int = Field(default=8000, ge=1, le=65535)
@@ -207,6 +209,14 @@ class OrchestratorConfig(BaseModel):
         if source.get("CHANGEGUARD_MAX_REPAIR_ATTEMPTS"):
             kwargs["max_repair_attempts"] = int(
                 source["CHANGEGUARD_MAX_REPAIR_ATTEMPTS"]
+            )
+        if source.get("CHANGEGUARD_MAX_PATCH_SIZE_BYTES"):
+            kwargs["max_patch_size_bytes"] = int(
+                source["CHANGEGUARD_MAX_PATCH_SIZE_BYTES"]
+            )
+        if source.get("CHANGEGUARD_MAX_PATCH_CHANGED_FILES"):
+            kwargs["max_patch_changed_files"] = int(
+                source["CHANGEGUARD_MAX_PATCH_CHANGED_FILES"]
             )
         if source.get("CHANGEGUARD_MAX_CONCURRENT_RUNS"):
             kwargs["max_concurrent_runs"] = int(
