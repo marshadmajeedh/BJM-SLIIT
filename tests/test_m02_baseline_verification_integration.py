@@ -256,8 +256,10 @@ def _common_premium_discount_test_suite(
         "import pytest\n\n"
         "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'mini_pos'))\n"
     )
+    if marker_path is not None:
+        header = "import os\n" + header
     marker_stmt = (
-        f"    pathlib.Path({str(marker_path)!r}).write_text('executed', encoding='utf-8')\n"
+        "    pathlib.Path(os.environ['CHANGEGUARD_TEST_MARKER']).write_text('executed', encoding='utf-8')\n"
         if marker_path is not None
         else ""
     )
@@ -805,6 +807,7 @@ def test_comparison_engine_all_deterministic_classifications_and_schema_truthful
 
 def test_phase9_offline_e2e_premium_discount_demo_correct_vs_regressive(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phase 9 E2E Demo + Reqs 2, 4, 16, 17, 18, 20, 21: Real pytest on baseline vs Impl A & Impl B."""
     repos_root = tmp_path / "repos"
@@ -817,6 +820,7 @@ def test_phase9_offline_e2e_premium_discount_demo_correct_vs_regressive(
     orig_b_tree = _snapshot_tree_bytes(repo_b)
 
     pre_gate1_marker = tmp_path / "no_exec_before_gate1.txt"
+    monkeypatch.setenv("CHANGEGUARD_TEST_MARKER", str(pre_gate1_marker))
     cfg = _make_config(
         tmp_path,
         repos_root=repos_root,
@@ -1616,12 +1620,14 @@ def test_p06_patch_rollback_restores_git_index_and_prunes_empty_dirs(
 
 def test_gate1_rejection_never_runs_tests_and_incomplete_coverage_distinguishes_assurance(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reqs 16 & 18: Gate 1 rejection runs zero tests; partial coverage distinguishes ordinary approval from complete assurance."""
     repos_root = tmp_path / "repos"
     repo = repos_root / "pos_cov"
     _create_mini_pos_repo(repo, mode="correct")
     marker = tmp_path / "gate1_reject_marker.txt"
+    monkeypatch.setenv("CHANGEGUARD_TEST_MARKER", str(marker))
     cfg = _make_config(tmp_path, repos_root=repos_root, configured={"pos-cov": repo})
     app = create_app(
         cfg,
@@ -1730,4 +1736,3 @@ def test_real_existing_regression_suite_fail_to_pass_is_fixed_existing_failure(
         )
         assert cmp_data["summary"]["fixed_existing_failure_count"] == 1
         assert cmp_data["summary"]["has_confirmed_regression"] is False
-
