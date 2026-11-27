@@ -9,6 +9,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -981,6 +982,27 @@ def _redact_host_paths_str(text: str, host_paths: tuple[str | None, ...]) -> str
     return sanitized
 
 
+def _host_paths_for_redaction(
+    host_paths: tuple[str | None, ...],
+) -> tuple[str | None, ...]:
+    absolute_paths = [
+        Path(path)
+        for path in host_paths
+        if path and Path(path).is_absolute()
+    ]
+    if len(absolute_paths) < 2:
+        return host_paths
+
+    try:
+        shared_root = Path(os.path.commonpath(absolute_paths))
+    except ValueError:
+        return host_paths
+
+    if shared_root == Path(shared_root.anchor) or len(shared_root.parts) <= 2:
+        return host_paths
+    return (*host_paths, str(shared_root))
+
+
 def _to_independent_review_response(
     review: IndependentReviewResult | None,
     *,
@@ -1295,10 +1317,12 @@ def to_run_summary(run: WorkflowRunRecord) -> RunSummaryResponse:
 
 def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
     """Convert internal WorkflowRunRecord to a safe dashboard-ready detail payload."""
-    host_paths = (
-        run.workspace_path,
-        run.baseline_workspace_path,
-        run.repository.repository_path,
+    host_paths = _host_paths_for_redaction(
+        (
+            run.workspace_path,
+            run.baseline_workspace_path,
+            run.repository.repository_path,
+        )
     )
     policy_decision = evaluate_approval_policy(run)
     return RunDetailResponse(
