@@ -24,6 +24,12 @@ def validate_report(report):
 
     risks = report.get("potential_risks")
     tests = report.get("recommended_tests")
+    if not isinstance(report.get("requires_verification"), bool):
+        raise ValueError("Missing or invalid requires_verification")
+
+    affected_files = report.get("affected_files", [])
+    if not isinstance(affected_files, list) or not all(isinstance(item, str) for item in affected_files):
+        raise ValueError("affected_files must be a list of strings")
 
     if not isinstance(risks, list):
         raise ValueError("potential_risks must be a list")
@@ -94,6 +100,7 @@ Return ONLY a JSON object in this structure:
 
 {
   "summary": "Short explanation",
+  "affected_files": ["filename"],
   "potential_risks": [
     {
       "file": "filename",
@@ -111,10 +118,20 @@ Return ONLY a JSON object in this structure:
 Severity can be low, medium, or high.
 """
 
+    bounded_diff = code_diff[:12000]
+    bounded_codebase = {
+        "agent": codebase_report.get("agent"),
+        "status": codebase_report.get("status"),
+        "source_path": codebase_report.get("source_path"),
+        "repository_summary": codebase_report.get("repository_summary"),
+        "reports": codebase_report.get("reports", [])[:20],
+    }
+
     user_input = {
-        "requirement": requirement,
-        "codebase_report": codebase_report,
-        "git_diff": code_diff
+        "requirement": requirement[:4000],
+        "codebase_report": bounded_codebase,
+        "git_diff": bounded_diff,
+        "truncated": len(code_diff) > len(bounded_diff),
     }
 
     try:
