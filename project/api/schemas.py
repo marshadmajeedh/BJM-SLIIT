@@ -669,9 +669,19 @@ def _to_test_generation_response(
 
 def _to_verification_response(
     ver: VerificationResult | None,
+    *,
+    host_paths: tuple[str | None, ...] = (),
 ) -> VerificationResponse | None:
     if ver is None:
         return None
+
+    def redact_host_paths(text: str) -> str:
+        sanitized = redact_secrets(text)
+        for host_path in host_paths:
+            if host_path:
+                sanitized = sanitized.replace(host_path, "[host path redacted]")
+        return sanitized
+
     return VerificationResponse(
         execution_status=ver.execution_status,
         verification_outcome=ver.verification_outcome,
@@ -696,8 +706,8 @@ def _to_verification_response(
             _sanitize_baseline_comparison(ver.baseline_comparison)
             or ver.baseline_comparison
         ),
-        stdout_excerpt=redact_secrets(ver.stdout_excerpt),
-        stderr_excerpt=redact_secrets(ver.stderr_excerpt),
+        stdout_excerpt=redact_host_paths(ver.stdout_excerpt),
+        stderr_excerpt=redact_host_paths(ver.stderr_excerpt),
         error=_sanitize_error(ver.error),
         assumptions=list(ver.assumptions),
     )
@@ -884,7 +894,14 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         baseline_verification=_sanitize_baseline_verification(run.baseline_verification),
         modified_verification=_sanitize_modified_verification(run.modified_verification),
         baseline_comparison=_sanitize_baseline_comparison(run.baseline_comparison),
-        verification=_to_verification_response(run.verification),
+        verification=_to_verification_response(
+            run.verification,
+            host_paths=(
+                run.workspace_path,
+                run.baseline_workspace_path,
+                run.repository.repository_path,
+            ),
+        ),
         report=_to_report_response(run.report),
         final_decision=run.final_decision,
         error=_sanitize_error(run.error),
