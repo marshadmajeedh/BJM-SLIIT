@@ -652,6 +652,8 @@ class PatchValidator:
         valid_criterion_ids: set[str] | None = None,
         max_patch_size_bytes: int | None = None,
         max_patch_changed_files: int | None = None,
+        forbidden_paths: set[str] | None = None,
+        forbid_test_modifications: bool = False,
     ) -> PatchValidationResult:
         """Run all pre-application safety, scope, integrity, and applicability checks."""
         checks_passed: list[str] = []
@@ -868,6 +870,11 @@ class PatchValidator:
             checks_passed.append("changed_file_limit")
 
         # 8. Path traversal, absolute paths, protected files, allowed paths, symlinks
+        normalized_forbidden = {
+            p.strip().replace("\\", "/").lstrip("./")
+            for p in (forbidden_paths or set())
+            if p and p.strip()
+        }
         diff_target_paths: set[str] = set()
         path_check_failed = False
         for pf in parsed_files:
@@ -877,6 +884,44 @@ class PatchValidator:
                 if path_err is not None or norm_p is None:
                     if path_err is not None:
                         violations.append(path_err)
+                    path_check_failed = True
+                    continue
+
+                if forbid_test_modifications:
+                    parts_lower = [part.lower() for part in PurePath(norm_p).parts]
+                    fname_lower = parts_lower[-1] if parts_lower else ""
+                    is_test_artifact = (
+                        norm_p in normalized_forbidden
+                        or ".changeguard_generated_tests" in parts_lower
+                        or "tests" in parts_lower
+                        or fname_lower.startswith("test_")
+                        or fname_lower.endswith("_test.py")
+                        or fname_lower == "conftest.py"
+                    )
+                    if is_test_artifact:
+                        violations.append(
+                            AgentError(
+                                code="PATCH_TEST_MODIFICATION_FORBIDDEN",
+                                message=(
+                                    "Patch rejected: modifying approved verification tests or "
+                                    f"established regression test suites is forbidden ('{norm_p}')."
+                                ),
+                                details={"path": norm_p},
+                            )
+                        )
+                        path_check_failed = True
+                        continue
+                elif norm_p in normalized_forbidden:
+                    violations.append(
+                        AgentError(
+                            code="PATCH_TEST_MODIFICATION_FORBIDDEN",
+                            message=(
+                                f"Patch rejected: target path '{norm_p}' is protected as a "
+                                "verification artifact."
+                            ),
+                            details={"path": norm_p},
+                        )
+                    )
                     path_check_failed = True
                     continue
 

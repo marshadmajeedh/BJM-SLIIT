@@ -21,6 +21,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ._common import STABLE_ID_PATTERN, AgentError, utc_now
+from .repair import (
+    PatchAttemptRecord,
+    RepairAttemptHistory,
+    RepairEligibilityCategory,
+    RepairEligibilityResult,
+    RepairPolicy,
+    RepairTerminationReason,
+)
 from .requirements import RequirementAnalysisResult, RequirementTraceability
 from .verification import (
     BaselineComparisonEvidence,
@@ -297,6 +305,19 @@ class ChangePackageReport(BaseModel):
     patch_proposal_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     patch_is_deterministic_fixture: bool | None = None
     patch_applied: bool | None = None
+    repair_enabled: bool | None = None
+    max_repair_attempts: int | None = Field(default=None, ge=0, le=2)
+    repair_attempts_consumed: int = Field(default=0, ge=0, le=2)
+    current_attempt_number: int | None = Field(default=None, ge=1, le=3)
+    remaining_repair_budget: int | None = Field(default=None, ge=0, le=2)
+    repair_eligibility: RepairEligibilityResult | None = None
+    repair_termination_reason: RepairTerminationReason | None = None
+    repair_history: RepairAttemptHistory | None = None
+    final_candidate_proposal_id: str | None = None
+    final_candidate_patch_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    final_verification_outcome: VerificationOutcome | None = None
     original_source_snapshot_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )

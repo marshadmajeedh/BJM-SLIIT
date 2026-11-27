@@ -255,6 +255,21 @@ def mirror_approved_tests_to_baseline(
     return verified_hashes
 
 
+def mirror_approved_tests_to_workspace(
+    source_workspace: str | Path,
+    dest_workspace: str | Path,
+    approved_specs: Mapping[str, ApprovedTestSpec],
+    selected_test_ids: list[str],
+) -> dict[str, str]:
+    """Copy exact Gate-1-approved test files between isolated workspaces with SHA-256 parity."""
+    return mirror_approved_tests_to_baseline(
+        source_workspace,
+        dest_workspace,
+        approved_specs,
+        selected_test_ids,
+    )
+
+
 def discover_existing_regression_tests(
     workspace_repo_path: str | Path,
     source_path: str = ".",

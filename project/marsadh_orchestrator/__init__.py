@@ -2,7 +2,9 @@
 
 from .adapters import (
     DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL,
+    DeterministicPersistentRegressionPatchFixture,
     DeterministicPremiumDiscountPatchFixture,
+    DeterministicRegressiveThenFixedPatchFixture,
     PatchGenerationAdapter,
     PatchGeneratorProvider,
 )
@@ -13,6 +15,7 @@ from .baseline_verification import (
     discover_existing_regression_tests,
     execute_snapshot_verification,
     mirror_approved_tests_to_baseline,
+    mirror_approved_tests_to_workspace,
     resolve_scenario_test_purpose,
 )
 from .config import OrchestratorConfig
@@ -36,6 +39,13 @@ from .orchestrator import (
     validate_transition,
 )
 from .patch_engine import PatchApplicator, PatchValidator
+from .repair_engine import (
+    RepairEligibilityEvaluator,
+    build_repair_request_evidence,
+    check_approved_test_assumptions_preserved,
+    compute_failure_signature,
+    is_provider_auth_or_rate_limit_error,
+)
 from .requirement_analyst import (
     DEFAULT_OFFLINE_REQUIREMENT_LABEL,
     RequirementAnalystAgent,
@@ -59,7 +69,9 @@ __all__ = [
     "BaselineTestMirrorError",
     "DEFAULT_OFFLINE_PATCH_FIXTURE_LABEL",
     "DEFAULT_OFFLINE_REQUIREMENT_LABEL",
+    "DeterministicPersistentRegressionPatchFixture",
     "DeterministicPremiumDiscountPatchFixture",
+    "DeterministicRegressiveThenFixedPatchFixture",
     "InfrastructureUnavailableError",
     "InvalidStateTransitionError",
     "OrchestratorConfig",
@@ -70,6 +82,7 @@ __all__ = [
     "PatchGenerationAdapter",
     "PatchGeneratorProvider",
     "PatchValidator",
+    "RepairEligibilityEvaluator",
     "RepositoryAccessDeniedError",
     "RequirementAnalystAgent",
     "ReviewConflictError",
@@ -83,8 +96,11 @@ __all__ = [
     "WorkspaceError",
     "WorkspaceManager",
     "WorkspaceSecurityError",
+    "build_repair_request_evidence",
     "build_requirement_analysis_prompt",
     "build_test_evidence_from_aggregate_result",
+    "check_approved_test_assumptions_preserved",
+    "compute_failure_signature",
     "compute_git_diff_sha256",
     "compute_source_snapshot_sha256",
     "default_offline_model_stub",
@@ -94,7 +110,9 @@ __all__ = [
     "format_requirements_for_downstream",
     "generate_log_id",
     "generate_run_id",
+    "is_provider_auth_or_rate_limit_error",
     "mirror_approved_tests_to_baseline",
+    "mirror_approved_tests_to_workspace",
     "redact_secrets",
     "resolve_scenario_test_purpose",
     "validate_transition",

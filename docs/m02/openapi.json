@@ -1273,6 +1273,117 @@
             ],
             "title": "Patch Applied"
           },
+          "repair_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Enabled"
+          },
+          "max_repair_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repair Attempts"
+          },
+          "repair_attempts_consumed": {
+            "type": "integer",
+            "title": "Repair Attempts Consumed",
+            "default": 0
+          },
+          "current_attempt_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Attempt Number"
+          },
+          "remaining_repair_budget": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Repair Budget"
+          },
+          "repair_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairEligibilityResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_termination_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairTerminationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_history": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairAttemptHistoryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "final_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Proposal Id"
+          },
+          "final_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Patch Sha256"
+          },
+          "final_verification_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "original_source_snapshot_sha256": {
             "anyOf": [
               {
@@ -1693,6 +1804,30 @@
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode",
             "default": "offline_test"
+          },
+          "repair_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Enabled"
+          },
+          "max_repair_attempts": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 2.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repair Attempts"
           }
         },
         "additionalProperties": false,
@@ -2001,6 +2136,16 @@
             "type": "boolean",
             "title": "Patch Generator Configured",
             "default": false
+          },
+          "auto_repair_enabled": {
+            "type": "boolean",
+            "title": "Auto Repair Enabled",
+            "default": true
+          },
+          "max_repair_attempts": {
+            "type": "integer",
+            "title": "Max Repair Attempts",
+            "default": 2
           },
           "supported_workflow_modes": {
             "items": {
@@ -2515,6 +2660,320 @@
         ],
         "title": "PatchApplicationResponse",
         "description": "Safe patch application evidence view preserving original and resulting snapshots."
+      },
+      "PatchAttemptResponse": {
+        "properties": {
+          "attempt_number": {
+            "type": "integer",
+            "title": "Attempt Number"
+          },
+          "attempt_type": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "repair"
+            ],
+            "title": "Attempt Type"
+          },
+          "repair_attempt_index": {
+            "type": "integer",
+            "title": "Repair Attempt Index",
+            "default": 0
+          },
+          "original_requirement": {
+            "type": "string",
+            "title": "Original Requirement"
+          },
+          "acceptance_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Acceptance Criterion Ids"
+          },
+          "previous_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Proposal Id"
+          },
+          "previous_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Patch Sha256"
+          },
+          "base_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Snapshot Sha256"
+          },
+          "resulting_source_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Source Snapshot Sha256"
+          },
+          "resulting_git_diff_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Git Diff Sha256"
+          },
+          "patch_generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchGenerationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "patch_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Proposal Id"
+          },
+          "patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Sha256"
+          },
+          "patch_validation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchValidationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "patch_application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchApplicationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "approved_test_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved Test Ids"
+          },
+          "approved_test_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approved Test Hashes"
+          },
+          "baseline_reused": {
+            "type": "boolean",
+            "title": "Baseline Reused",
+            "default": false
+          },
+          "baseline_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modified_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModifiedVerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/FailureDiagnostic"
+            },
+            "type": "array",
+            "title": "Failure Diagnostics"
+          },
+          "failure_signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Signature"
+          },
+          "baseline_comparison": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BaselineComparisonEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairEligibilityResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_invoked": {
+            "type": "boolean",
+            "title": "Provider Invoked",
+            "default": false
+          },
+          "consumed_repair_budget": {
+            "type": "boolean",
+            "title": "Consumed Repair Budget",
+            "default": false
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture",
+            "default": false
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output",
+            "default": false
+          },
+          "model_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Label"
+          },
+          "durations_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Durations Ms"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed_verification",
+              "generation_failed",
+              "generation_unavailable",
+              "validation_failed",
+              "application_failed",
+              "impact_analysis_failed",
+              "duplicate_patch_rejected",
+              "test_modification_rejected",
+              "scope_invalidated",
+              "integrity_error",
+              "interrupted"
+            ],
+            "title": "Outcome"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/AgentError"
+            },
+            "type": "array",
+            "title": "Errors"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "attempt_number",
+          "attempt_type",
+          "original_requirement",
+          "started_at",
+          "outcome"
+        ],
+        "title": "PatchAttemptResponse",
+        "description": "Sanitized single patch attempt record without host paths or unredacted secrets."
       },
       "PatchFileChange": {
         "properties": {
@@ -3182,6 +3641,316 @@
         "title": "RegressionComparisonSummary",
         "description": "Aggregate summary of deterministic baseline-vs-modified comparison outcomes."
       },
+      "RepairAttemptHistoryResponse": {
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/RepairPolicy"
+          },
+          "total_proposals_attempted": {
+            "type": "integer",
+            "title": "Total Proposals Attempted",
+            "default": 0
+          },
+          "repair_attempts_consumed": {
+            "type": "integer",
+            "title": "Repair Attempts Consumed",
+            "default": 0
+          },
+          "current_attempt_number": {
+            "type": "integer",
+            "title": "Current Attempt Number",
+            "default": 0
+          },
+          "remaining_repair_budget": {
+            "type": "integer",
+            "title": "Remaining Repair Budget",
+            "default": 0
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/PatchAttemptResponse"
+            },
+            "type": "array",
+            "title": "Attempts"
+          },
+          "seen_patch_hashes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Seen Patch Hashes"
+          },
+          "seen_failure_signatures": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Seen Failure Signatures"
+          },
+          "last_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairEligibilityResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "termination_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairTerminationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "termination_summary": {
+            "type": "string",
+            "title": "Termination Summary",
+            "default": ""
+          },
+          "final_candidate_attempt_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Attempt Number"
+          },
+          "final_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Proposal Id"
+          },
+          "final_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Patch Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "policy"
+        ],
+        "title": "RepairAttemptHistoryResponse",
+        "description": "Sanitized bounded automated patch repair history and budget status."
+      },
+      "RepairEligibilityCategory": {
+        "type": "string",
+        "enum": [
+          "eligible_application_regression",
+          "eligible_acceptance_failure",
+          "not_needed_verification_passed",
+          "repair_disabled",
+          "workflow_mode_unsupported",
+          "patch_not_applied",
+          "unresolved_mandatory_ambiguity",
+          "budget_exhausted",
+          "test_defect_or_syntax_error",
+          "collection_or_import_error",
+          "missing_dependency",
+          "provider_auth_or_rate_limit",
+          "verification_infrastructure_error",
+          "unavailable_or_incomparable_evidence",
+          "workspace_or_test_integrity_violation",
+          "unattributable_failure",
+          "persistent_preexisting_failure"
+        ],
+        "title": "RepairEligibilityCategory",
+        "description": "Deterministic classification produced by the conservative repair eligibility evaluator."
+      },
+      "RepairEligibilityResult": {
+        "properties": {
+          "eligible": {
+            "type": "boolean",
+            "title": "Eligible"
+          },
+          "category": {
+            "$ref": "#/components/schemas/RepairEligibilityCategory"
+          },
+          "decision_reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Decision Reason"
+          },
+          "blocking_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Blocking Reasons"
+          },
+          "attributable_test_identities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Attributable Test Identities"
+          },
+          "failed_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failed Criterion Ids"
+          },
+          "confirmed_regression_identities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Confirmed Regression Identities"
+          },
+          "failure_signature": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Signature"
+          },
+          "next_attempt_number": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3.0,
+                "minimum": 2.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Attempt Number"
+          },
+          "remaining_repair_budget": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Remaining Repair Budget",
+            "default": 0
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Evaluated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eligible",
+          "category",
+          "decision_reason"
+        ],
+        "title": "RepairEligibilityResult",
+        "description": "Conservative, deterministic decision on whether automated patch repair is permitted."
+      },
+      "RepairPolicy": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "max_repair_attempts": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Max Repair Attempts",
+            "default": 2
+          },
+          "max_total_proposals": {
+            "type": "integer",
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Max Total Proposals",
+            "default": 3
+          },
+          "allow_for_verify_existing_change": {
+            "type": "boolean",
+            "const": false,
+            "title": "Allow For Verify Existing Change",
+            "default": false
+          },
+          "patch_strategy": {
+            "type": "string",
+            "const": "immutable_original_snapshot",
+            "title": "Patch Strategy",
+            "default": "immutable_original_snapshot"
+          },
+          "stop_on_duplicate_patch": {
+            "type": "boolean",
+            "title": "Stop On Duplicate Patch",
+            "default": true
+          },
+          "stop_on_no_progress": {
+            "type": "boolean",
+            "title": "Stop On No Progress",
+            "default": true
+          },
+          "require_unchanged_approved_tests": {
+            "type": "boolean",
+            "title": "Require Unchanged Approved Tests",
+            "default": true
+          },
+          "reuse_validated_baseline": {
+            "type": "boolean",
+            "title": "Reuse Validated Baseline",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RepairPolicy",
+        "description": "Explicitly configurable bounded automated patch repair policy."
+      },
+      "RepairTerminationReason": {
+        "type": "string",
+        "enum": [
+          "not_needed",
+          "repair_disabled",
+          "workflow_mode_unsupported",
+          "repair_succeeded",
+          "budget_exhausted",
+          "ineligible_failure",
+          "duplicate_patch_detected",
+          "no_progress_detected",
+          "provider_unavailable",
+          "provider_error",
+          "patch_validation_failed",
+          "patch_application_failed",
+          "test_modification_rejected",
+          "test_assumptions_invalidated",
+          "workspace_integrity_error",
+          "process_interrupted"
+        ],
+        "title": "RepairTerminationReason",
+        "description": "Explicit, auditable reason why bounded automated repair did not run or stopped."
+      },
       "RepositorySummaryResponse": {
         "properties": {
           "repository_id": {
@@ -3721,6 +4490,116 @@
             ],
             "title": "Patch Attempt Number"
           },
+          "repair_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Enabled"
+          },
+          "max_repair_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Repair Attempts"
+          },
+          "repair_attempts_consumed": {
+            "type": "integer",
+            "title": "Repair Attempts Consumed",
+            "default": 0
+          },
+          "remaining_repair_budget": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Repair Budget"
+          },
+          "repair_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairEligibilityResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_termination_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairTerminationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repair_history": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairAttemptHistoryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "final_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Proposal Id"
+          },
+          "final_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Candidate Patch Sha256"
+          },
+          "final_verification_outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -4045,6 +4924,32 @@
               }
             ],
             "title": "Patch Attempt Number"
+          },
+          "repair_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Enabled"
+          },
+          "repair_attempts_consumed": {
+            "type": "integer",
+            "title": "Repair Attempts Consumed",
+            "default": 0
+          },
+          "repair_termination_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepairTerminationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "changed_file_count": {
             "type": "integer",
@@ -5080,6 +5985,8 @@
           "RUNNING_BASELINE_VERIFICATION",
           "RUNNING_MODIFIED_VERIFICATION",
           "COMPARING_VERIFICATION_RESULTS",
+          "EVALUATING_REPAIR_ELIGIBILITY",
+          "REPAIRING_PATCH",
           "RUNNING_VERIFICATION",
           "COMPILING_REPORT",
           "AWAITING_FINAL_APPROVAL",
