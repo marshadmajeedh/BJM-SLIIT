@@ -33,6 +33,11 @@ from project.schemas.repair import (
     RepairAttemptHistory,
     RepairEligibilityResult,
 )
+from project.schemas.review import (
+    EvidenceReconciliationResult,
+    IndependentReviewRequest,
+    IndependentReviewResult,
+)
 from project.schemas.workflow import AgentLogEntry, WorkflowRunRecord, WorkflowState
 
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -351,6 +356,135 @@ def _sanitize_repair_history(
     )
 
 
+def _sanitize_independent_review_request(
+    req: IndependentReviewRequest | None,
+) -> IndependentReviewRequest | None:
+    if req is None:
+        return None
+    sanitized_ver = redact_nested_secrets(req.verification_summary)
+    sanitized_cmp = redact_nested_secrets(req.baseline_comparison_summary)
+    sanitized_impact = redact_nested_secrets(req.impact_summary)
+    sanitized_repair = redact_nested_secrets(req.repair_attempt_summary)
+    return req.model_copy(
+        update={
+            "original_requirement": redact_secrets(req.original_requirement),
+            "candidate_unified_diff": (
+                redact_secrets(req.candidate_unified_diff)
+                if req.candidate_unified_diff is not None
+                else None
+            ),
+            # Never persist raw source file contents into SQLite; retain path list only.
+            "relevant_source_excerpts": {},
+            "impact_summary": sanitized_impact if isinstance(sanitized_impact, list) else [],
+            "verification_summary": sanitized_ver if isinstance(sanitized_ver, dict) else {},
+            "baseline_comparison_summary": (
+                sanitized_cmp if isinstance(sanitized_cmp, dict) else {}
+            ),
+            "repair_attempt_summary": (
+                sanitized_repair if isinstance(sanitized_repair, list) else []
+            ),
+            "existing_evidence_limitations": [
+                redact_secrets(lim) for lim in req.existing_evidence_limitations
+            ],
+        }
+    )
+
+
+def _sanitize_independent_review(
+    review: IndependentReviewResult | None,
+) -> IndependentReviewResult | None:
+    if review is None:
+        return None
+    return review.model_copy(
+        update={
+            "summary": redact_secrets(review.summary),
+            "findings": [
+                f.model_copy(
+                    update={
+                        "title": redact_secrets(f.title),
+                        "description": redact_secrets(f.description),
+                        "reconciliation_note": redact_secrets(f.reconciliation_note),
+                        "evidence_references": [
+                            ref.model_copy(
+                                update={"description": redact_secrets(ref.description)}
+                            )
+                            for ref in f.evidence_references
+                        ],
+                    }
+                )
+                for f in review.findings
+            ],
+            "requirement_compliance_concerns": [
+                redact_secrets(c) for c in review.requirement_compliance_concerns
+            ],
+            "potential_behavioral_regressions": [
+                redact_secrets(c) for c in review.potential_behavioral_regressions
+            ],
+            "security_and_maintainability_concerns": [
+                redact_secrets(c) for c in review.security_and_maintainability_concerns
+            ],
+            "missing_verification_evidence": [
+                redact_secrets(c) for c in review.missing_verification_evidence
+            ],
+            "unsupported_assumptions": [
+                redact_secrets(c) for c in review.unsupported_assumptions
+            ],
+            "evidence_references": [
+                ref.model_copy(update={"description": redact_secrets(ref.description)})
+                for ref in review.evidence_references
+            ],
+            "error": _sanitize_error(review.error),
+            "notes": [redact_secrets(n) for n in review.notes],
+        }
+    )
+
+
+def _sanitize_review_reconciliation(
+    recon: EvidenceReconciliationResult | None,
+) -> EvidenceReconciliationResult | None:
+    if recon is None:
+        return None
+    return recon.model_copy(
+        update={
+            "material_disagreements": [
+                redact_secrets(item) for item in recon.material_disagreements
+            ],
+            "unsubstantiated_claims": [
+                redact_secrets(item) for item in recon.unsubstantiated_claims
+            ],
+            "invalid_evidence_references": [
+                redact_secrets(item) for item in recon.invalid_evidence_references
+            ],
+            "approval_restrictions": [
+                redact_secrets(item) for item in recon.approval_restrictions
+            ],
+            "reconciled_summary": redact_secrets(recon.reconciled_summary),
+        }
+    )
+
+
+def _sanitize_verification_result(ver: Any) -> Any:
+    if ver is None:
+        return None
+    sanitized_failures = [
+        fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+        for fail in ver.failures
+    ]
+    sanitized_bc = _sanitize_baseline_comparison(ver.baseline_comparison)
+    return ver.model_copy(
+        update={
+            "error": _sanitize_error(ver.error),
+            "collection_errors": [redact_secrets(err) for err in ver.collection_errors],
+            "failures": sanitized_failures,
+            "baseline_comparison": (
+                sanitized_bc if sanitized_bc is not None else ver.baseline_comparison
+            ),
+            "stdout_excerpt": redact_secrets(ver.stdout_excerpt),
+            "stderr_excerpt": redact_secrets(ver.stderr_excerpt),
+        }
+    )
+
+
 def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
     """Redact secret patterns across top-level and nested run errors/summaries."""
     updates: dict[str, object] = {"error": _sanitize_error(run.error)}
@@ -489,6 +623,30 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
             rep_updates["repair_history"] = _sanitize_repair_history(
                 run.report.repair_history
             )
+        if run.report.verification is not None:
+            rep_updates["verification"] = _sanitize_verification_result(
+                run.report.verification
+            )
+        if run.report.independent_review is not None:
+            rep_updates["independent_review"] = _sanitize_independent_review(
+                run.report.independent_review
+            )
+        if run.report.review_reconciliation is not None:
+            rep_updates["review_reconciliation"] = _sanitize_review_reconciliation(
+                run.report.review_reconciliation
+            )
+        if run.report.material_disagreements:
+            rep_updates["material_disagreements"] = [
+                redact_secrets(item) for item in run.report.material_disagreements
+            ]
+        if run.report.approval_restrictions:
+            rep_updates["approval_restrictions"] = [
+                redact_secrets(item) for item in run.report.approval_restrictions
+            ]
+        if run.report.recommendation_summary:
+            rep_updates["recommendation_summary"] = redact_secrets(
+                run.report.recommendation_summary
+            )
         if run.report.evidence_limitations:
             rep_updates["evidence_limitations"] = [
                 redact_secrets(lim) for lim in run.report.evidence_limitations
@@ -508,29 +666,21 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
         updates["baseline_comparison"] = _sanitize_baseline_comparison(
             run.baseline_comparison
         )
+    if run.independent_review_request is not None:
+        updates["independent_review_request"] = _sanitize_independent_review_request(
+            run.independent_review_request
+        )
+    if run.independent_review is not None:
+        updates["independent_review"] = _sanitize_independent_review(
+            run.independent_review
+        )
+    if run.review_reconciliation is not None:
+        updates["review_reconciliation"] = _sanitize_review_reconciliation(
+            run.review_reconciliation
+        )
 
     if run.verification is not None:
-        sanitized_failures = [
-            fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
-            for fail in run.verification.failures
-        ]
-        sanitized_bc = _sanitize_baseline_comparison(
-            run.verification.baseline_comparison
-        )
-        updates["verification"] = run.verification.model_copy(
-            update={
-                "error": _sanitize_error(run.verification.error),
-                "collection_errors": [
-                    redact_secrets(err) for err in run.verification.collection_errors
-                ],
-                "failures": sanitized_failures,
-                "baseline_comparison": sanitized_bc
-                if sanitized_bc is not None
-                else run.verification.baseline_comparison,
-                "stdout_excerpt": redact_secrets(run.verification.stdout_excerpt),
-                "stderr_excerpt": redact_secrets(run.verification.stderr_excerpt),
-            }
-        )
+        updates["verification"] = _sanitize_verification_result(run.verification)
 
     return run.model_copy(update=updates)
 
