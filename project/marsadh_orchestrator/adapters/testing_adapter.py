@@ -21,12 +21,14 @@ import hashlib
 import json
 import os
 import re
+import threading
 from collections.abc import Callable
 from pathlib import Path, PurePath
 
 from project.agents.munshif_testing.agent import generate_tests
 from project.agents.munshif_testing.export import export_scenarios
 from project.marsadh_orchestrator.config import OrchestratorConfig
+from project.marsadh_orchestrator.store import redact_secrets
 from project.schemas.agents import (
     AgentError,
     CodebaseAnalysisResult,
@@ -34,6 +36,8 @@ from project.schemas.agents import (
     TestGenerationResult,
 )
 from project.schemas.workflow import ExecutionMode
+
+_GROQ_ENV_LOCK = threading.Lock()
 
 _SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
@@ -114,21 +118,22 @@ class TestingAdapter:
         from project.agents.munshif_testing.groq_model import generate as groq_generate
 
         def _invoke_groq(prompt: str) -> str:
-            prev_key = os.environ.get("GROQ_API_KEY")
-            prev_model = os.environ.get("GROQ_MODEL")
-            try:
-                os.environ["GROQ_API_KEY"] = api_key
-                os.environ["GROQ_MODEL"] = groq_model
-                return groq_generate(prompt)
-            finally:
-                if prev_key is None:
-                    os.environ.pop("GROQ_API_KEY", None)
-                else:
-                    os.environ["GROQ_API_KEY"] = prev_key
-                if prev_model is None:
-                    os.environ.pop("GROQ_MODEL", None)
-                else:
-                    os.environ["GROQ_MODEL"] = prev_model
+            with _GROQ_ENV_LOCK:
+                prev_key = os.environ.get("GROQ_API_KEY")
+                prev_model = os.environ.get("GROQ_MODEL")
+                try:
+                    os.environ["GROQ_API_KEY"] = api_key
+                    os.environ["GROQ_MODEL"] = groq_model
+                    return groq_generate(prompt)
+                finally:
+                    if prev_key is None:
+                        os.environ.pop("GROQ_API_KEY", None)
+                    else:
+                        os.environ["GROQ_API_KEY"] = prev_key
+                    if prev_model is None:
+                        os.environ.pop("GROQ_MODEL", None)
+                    else:
+                        os.environ["GROQ_MODEL"] = prev_model
 
         return _invoke_groq, model_label or f"groq:{groq_model}"
 
@@ -283,7 +288,7 @@ class TestingAdapter:
                 model_label=resolved_label,
                 error=AgentError(
                     code="M03_GENERATION_ERROR",
-                    message=f"M03 test generation failed: {exc}",
+                    message=redact_secrets(f"M03 test generation failed: {exc}"),
                 ),
             )
 

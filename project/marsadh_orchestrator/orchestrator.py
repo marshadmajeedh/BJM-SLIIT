@@ -1826,9 +1826,16 @@ class OrchestratorService:
         if verification.verification_passed and outcome == VerificationOutcome.PASSED:
             recommendation = "needs_review"
             recommendation_label = "ready_for_human_review"
+            mock_clause = (
+                f" Tests were produced by offline mock/stub model '{gen.model_label}' "
+                "(is_mock_output=True), not a live LLM."
+                if gen is not None and gen.is_mock_output
+                else ""
+            )
             recommendation_summary = (
                 "All approved generated tests passed against the modified working copy. "
-                "Ready for human review; passing generated tests alone is not proof of full regression safety."
+                "Ready for human review; passing generated tests alone is not proof of "
+                f"full requirement verification, regression safety, or production readiness.{mock_clause}"
             )
         elif outcome == VerificationOutcome.FAILED_TESTS:
             recommendation = "reject"
@@ -1885,6 +1892,10 @@ class OrchestratorService:
             )
 
         traceability = {
+            "requirement_traceability_status": "incomplete",
+            "structured_acceptance_criteria_status": "unavailable",
+            "requirement_verification_proven": False,
+            "baseline_regression_comparison_status": verification.baseline_comparison.status,
             "user_supplied_requirements": run.requirements,
             "changed_files": changed_files,
             "impacted_modules": impacted_modules,
