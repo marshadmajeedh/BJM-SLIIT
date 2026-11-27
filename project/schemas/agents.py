@@ -14,16 +14,14 @@ Design assumptions:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-def utc_now() -> datetime:
-    """Return a timezone-aware UTC timestamp."""
-    return datetime.now(UTC)
+from ._common import STABLE_ID_PATTERN, AgentError, utc_now
+from .requirements import RequirementAnalysisResult, RequirementTraceability
 
 
 class AgentExecutionStatus(str, Enum):
@@ -34,17 +32,6 @@ class AgentExecutionStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     TIMEOUT = "timeout"
-
-
-class AgentError(BaseModel):
-    """Structured, non-secret error payload recorded across M02 components."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    code: str = Field(..., min_length=1, max_length=100)
-    message: str = Field(..., min_length=1, max_length=2000)
-    details: dict[str, Any] = Field(default_factory=dict)
-    retryable: bool = False
 
 
 class AgentExecutionRecord(BaseModel):
@@ -142,6 +129,24 @@ class GeneratedTestScenario(BaseModel):
     exported_relative_path: str | None = None
     exported_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     approved: bool = False
+    criterion_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("criterion_ids")
+    @classmethod
+    def _validate_criterion_ids(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for raw_id in value:
+            cid = raw_id.strip()
+            if not STABLE_ID_PATTERN.match(cid):
+                raise ValueError(
+                    f"Invalid criterion_id '{raw_id}': expected stable identifier "
+                    "matching ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+                )
+            if cid not in seen:
+                seen.add(cid)
+                cleaned.append(cid)
+        return cleaned
 
 
 class ApprovedTestSpec(BaseModel):
@@ -319,6 +324,7 @@ class ChangePackageReport(BaseModel):
     impacted_modules: list[str] = Field(default_factory=list)
     approved_scenario_ids: list[str] = Field(default_factory=list)
     executed_scenario_ids: list[str] = Field(default_factory=list)
+    requirement_analysis: RequirementAnalysisResult | None = None
     codebase_analysis: CodebaseAnalysisResult | None = None
     test_generation: TestGenerationResult | None = None
     verification: VerificationResult | None = None
@@ -335,6 +341,7 @@ class ChangePackageReport(BaseModel):
     ] = "additional_review_required"
     recommendation_summary: str = ""
     unverified_requirements: list[str] = Field(default_factory=list)
+    criterion_traceability: list[RequirementTraceability] = Field(default_factory=list)
     traceability: dict[str, Any] = Field(default_factory=dict)
     agent_communication_summary: list[dict[str, Any]] = Field(default_factory=list)
     evidence_limitations: list[str] = Field(default_factory=list)

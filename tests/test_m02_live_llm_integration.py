@@ -44,7 +44,11 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from project.main import create_app
-from project.marsadh_orchestrator import OrchestratorConfig, RunStore
+from project.marsadh_orchestrator import (
+    OrchestratorConfig,
+    RunStore,
+    deterministic_offline_requirement_analyzer,
+)
 from project.marsadh_orchestrator.orchestrator import default_offline_model_stub
 from project.schemas import (
     AgentError,
@@ -184,6 +188,8 @@ def _build_live_app(
     api_key: str | None = None,
     model: str | None = None,
     db_name: str = "live_test.sqlite3",
+    requirement_live_callable=None,
+    requirement_live_label: str | None = None,
 ):
     cfg = OrchestratorConfig(
         database_path=tmp_path / "state" / db_name,
@@ -196,7 +202,12 @@ def _build_live_app(
         verification_timeout_seconds=30,
         environment="test",
     )
-    return cfg, create_app(cfg, offline_model_callable=default_offline_model_stub)
+    return cfg, create_app(
+        cfg,
+        requirement_live_callable=requirement_live_callable,
+        requirement_live_label=requirement_live_label,
+        offline_model_callable=default_offline_model_stub,
+    )
 
 
 def _run_live_and_wait(
@@ -260,10 +271,17 @@ def test_real_groq_adapter_sdk_wiring_and_live_evidence_integrity(
 
         def _create(self, **kwargs: Any) -> Any:
             captured_create.append(kwargs)
+            messages = kwargs.get("messages", [])
+            system_msg = messages[0]["content"] if messages else ""
+            user_msg = messages[1]["content"] if len(messages) > 1 else ""
+            if "Requirement Analyst" in system_msg:
+                content = deterministic_offline_requirement_analyzer(user_msg)
+            else:
+                content = _valid_behavioral_json()
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        message=SimpleNamespace(content=_valid_behavioral_json())
+                        message=SimpleNamespace(content=content)
                     )
                 ]
             )
@@ -287,23 +305,28 @@ def test_real_groq_adapter_sdk_wiring_and_live_evidence_integrity(
         # Scenario A (Correct)
         gate1_ok = _run_live_and_wait(client, app, repo_id="pos-ok")
         assert gate1_ok["state"] == WorkflowState.AWAITING_TEST_REVIEW.value
+        assert gate1_ok["requirement_analysis"]["analysis_mode"] == "live_llm"
+        assert gate1_ok["requirement_analysis"]["is_deterministic_fixture"] is False
+        assert gate1_ok["requirement_analysis"]["model_label"] == f"groq:{configured_model}"
         assert gate1_ok["test_generation"]["generation_mode"] == "live_llm"
         assert gate1_ok["test_generation"]["is_mock_output"] is False
         assert gate1_ok["test_generation"]["model_label"] == f"groq:{configured_model}"
         assert gate1_ok["test_generation"]["executed"] is False
         assert gate1_ok["verification"] is None
 
-        # Verify exact SDK initialization & chat completion contract
-        assert len(captured_init) == 1
-        assert captured_init[0] == {
-            "api_key": synthetic_key,
-            "timeout": 60,
-            "max_retries": 2,
-        }
-        assert len(captured_create) == 1
-        assert captured_create[0]["model"] == configured_model
-        assert captured_create[0]["response_format"] == {"type": "json_object"}
-        assert captured_create[0]["temperature"] == 0.1
+        # Verify exact SDK initialization & chat completion contract for BOTH A1 and M03
+        assert len(captured_init) == 2
+        for init_call in captured_init:
+            assert init_call == {
+                "api_key": synthetic_key,
+                "timeout": 60,
+                "max_retries": 2,
+            }
+        assert len(captured_create) == 2
+        for create_call in captured_create:
+            assert create_call["model"] == configured_model
+            assert create_call["response_format"] == {"type": "json_object"}
+            assert create_call["temperature"] == 0.1
         # Process env must be restored cleanly after invocation
         assert os.environ.get("GROQ_API_KEY") is None
         assert os.environ.get("GROQ_MODEL") is None
@@ -394,9 +417,10 @@ def test_missing_api_key_and_missing_model_fail_closed_without_mock_fallback(
         assert failed["state"] == WorkflowState.FAILED.value
         assert failed["error"]["code"] == "LIVE_LLM_UNCONFIGURED"
         assert "GROQ_API_KEY" in failed["error"]["message"]
-        assert failed["test_generation"]["generation_mode"] == "live_llm"
-        assert failed["test_generation"]["is_mock_output"] is False
-        assert failed["test_generation"]["scenarios"] == []
+        assert failed["requirement_analysis"]["analysis_mode"] == "live_llm"
+        assert failed["requirement_analysis"]["is_deterministic_fixture"] is False
+        assert failed["requirement_analysis"]["is_mock_output"] is False
+        assert failed["test_generation"] is None
 
         logs = client.get(f"/api/runs/{failed['run_id']}/logs").json()
         assert any(
@@ -426,7 +450,9 @@ def test_missing_api_key_and_missing_model_fail_closed_without_mock_fallback(
         assert failed["state"] == WorkflowState.FAILED.value
         assert failed["error"]["code"] == "LIVE_LLM_UNCONFIGURED"
         assert "GROQ_MODEL" in failed["error"]["message"]
-        assert failed["test_generation"]["is_mock_output"] is False
+        assert failed["requirement_analysis"]["is_deterministic_fixture"] is False
+        assert failed["requirement_analysis"]["is_mock_output"] is False
+        assert failed["test_generation"] is None
         assert synthetic_key not in json.dumps(failed)
     assert synthetic_key.encode("utf-8") not in cfg_no_model.database_path.read_bytes()
 
@@ -519,6 +545,8 @@ def test_invalid_model_responses_fail_without_mock_fallback(
         configured_repos={"pos-ok": repo},
         api_key=synthetic_key,
         model="openai/gpt-oss-120b",
+        requirement_live_callable=deterministic_offline_requirement_analyzer,
+        requirement_live_label="groq:openai/gpt-oss-120b",
     )
     with TestClient(app) as client:
         failed = _run_live_and_wait(client, app)
@@ -634,6 +662,8 @@ def test_provider_failures_persist_structured_errors_without_fallback(
         configured_repos={"pos-ok": repo},
         api_key=synthetic_key,
         model="unsupported-or-test-model",
+        requirement_live_callable=deterministic_offline_requirement_analyzer,
+        requirement_live_label="groq:unsupported-or-test-model",
     )
     with TestClient(app) as client:
         failed = _run_live_and_wait(client, app)
