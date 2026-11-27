@@ -291,6 +291,20 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
     return []
 
 
+def _sanitize_error(error: AgentError | None) -> AgentError | None:
+    if error is None:
+        return None
+    return error.model_copy(
+        update={
+            "message": redact_secrets(error.message),
+            "details": {
+                k: redact_secrets(v) if isinstance(v, str) else v
+                for k, v in error.details.items()
+            },
+        }
+    )
+
+
 def _to_codebase_response(
     cb: CodebaseAnalysisResult | None,
 ) -> CodebaseAnalysisResponse | None:
@@ -308,7 +322,7 @@ def _to_codebase_response(
         impacted_modules_repo_relative=list(cb.impacted_modules_repo_relative),
         impacted_modules_source_relative=list(cb.impacted_modules_source_relative),
         file_impacts=list(cb.file_impacts),
-        error=cb.error,
+        error=_sanitize_error(cb.error),
         assumptions=list(cb.assumptions),
     )
 
@@ -328,7 +342,7 @@ def _to_test_generation_response(
         export_dir_relative=gen.export_dir_relative,
         exported_files=dict(gen.exported_files),
         exported_hashes=dict(gen.exported_hashes),
-        error=gen.error,
+        error=_sanitize_error(gen.error),
         assumptions=list(gen.assumptions),
     )
 
@@ -350,7 +364,10 @@ def _to_verification_response(
         failed=ver.failed,
         duration_seconds=ver.duration_seconds,
         collection_errors=[redact_secrets(err) for err in ver.collection_errors],
-        failures=list(ver.failures),
+        failures=[
+            fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+            for fail in ver.failures
+        ],
         risk_summary=ver.risk_summary,
         coverage_percent=ver.coverage_percent,
         coverage_status=ver.coverage_status,
@@ -358,7 +375,7 @@ def _to_verification_response(
         baseline_comparison=ver.baseline_comparison,
         stdout_excerpt=redact_secrets(ver.stdout_excerpt),
         stderr_excerpt=redact_secrets(ver.stderr_excerpt),
-        error=ver.error,
+        error=_sanitize_error(ver.error),
         assumptions=list(ver.assumptions),
     )
 
@@ -463,12 +480,20 @@ def to_run_detail(run: WorkflowRunRecord) -> RunDetailResponse:
         created_at=run.created_at,
         updated_at=run.updated_at,
         allowed_actions=_allowed_actions(run),
-        agent_records=list(run.agent_records),
+        agent_records=[
+            rec.model_copy(
+                update={
+                    "output_summary": redact_secrets(rec.output_summary),
+                    "error": _sanitize_error(rec.error),
+                }
+            )
+            for rec in run.agent_records
+        ],
         codebase_analysis=_to_codebase_response(run.codebase_analysis),
         test_generation=_to_test_generation_response(run.test_generation),
         test_review=run.test_review,
         verification=_to_verification_response(run.verification),
         report=_to_report_response(run.report),
         final_decision=run.final_decision,
-        error=run.error,
+        error=_sanitize_error(run.error),
     )

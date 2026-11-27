@@ -82,7 +82,7 @@ python -m uvicorn project.main:app --host 127.0.0.1 --port 8000
 
 | Mode | Value | Behavior | UI Badge Requirement |
 | :--- | :--- | :--- | :--- |
-| Offline deterministic stub (default) | `"offline_test"` | Uses deterministic local stub (`is_mock_output: true`, `model_label: "deterministic_offline_stub"`). Requires no `GROQ_API_KEY`. | Must clearly label scenarios as **Offline Mock/Stub Output** — never present as live AI performance. |
+| Offline deterministic stub (default) | `"offline_test"` | Uses deterministic local stub (`is_mock_output: true`, `model_label: "deterministic_offline_stub"`). Requires no `GROQ_API_KEY`. Note: the built-in default stub emits import/callable plumbing smoke tests only; behavioral offline demonstrations must inject fixture-specific behavioral tests. | Must clearly label scenarios as **Offline Mock/Stub Output** — never present as live AI performance or functional requirement proof. |
 | Live Groq LLM | `"live_llm"` | Requires server-side `GROQ_API_KEY` + `GROQ_MODEL`. **Never silently falls back to mock output**; fails explicitly with `LIVE_LLM_UNCONFIGURED` if credentials are missing. | Display `test_generation.model_label` (e.g., `groq:llama-3.3-70b-versatile`). |
 
 ---
@@ -243,8 +243,8 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
         "scenario_id": "SCN-001",
         "title": "Premium checkout applies 10% discount",
         "rationale": "billing.apply_discount was modified.",
-        "assumptions": "Deterministic offline stub output; human review required.",
-        "test_code": "def test_premium_discount():\n    assert True\n",
+        "assumptions": "Deterministic behavioral offline fixture test; human review required.",
+        "test_code": "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sample_projects/mini_pos'))\nfrom billing import checkout\n\ndef test_premium_discount():\n    assert checkout(100, 2, 'premium') == 180.0\n",
         "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "exported_relative_path": ".changeguard_generated_tests/test_generated_001.py",
         "exported_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -333,13 +333,48 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
     ],
     "approved_scenario_ids": ["SCN-001"],
     "executed_scenario_ids": ["SCN-001"],
+    "risk_summary": {
+      "severity": "Unknown",
+      "score": null,
+      "method": "unavailable",
+      "rationale": "Reviewed tests passed against the modified working copy, but baseline-versus-modified regression evidence and business-impact risk analysis are unavailable.",
+      "evidence_available": false
+    },
     "recommendation": "needs_review",
     "recommendation_label": "ready_for_human_review",
-    "recommendation_summary": "All approved generated tests passed against the modified working copy. Ready for human review; passing generated tests alone is not proof of full regression safety.",
-    "unverified_requirements": [],
-    "traceability": {},
+    "recommendation_summary": "All approved generated tests passed against the modified working copy. Ready for human review; passing generated tests alone is not proof of full requirement verification, regression safety, or production readiness. Tests were produced by offline mock/stub model 'deterministic_offline_stub' (is_mock_output=True), not a live LLM.",
+    "unverified_requirements": [
+      "Full end-to-end fulfillment of supplied natural-language requirements is not automatically proven because structured acceptance criteria decomposition and baseline regression comparison are unavailable."
+    ],
+    "traceability": {
+      "requirement_traceability_status": "incomplete",
+      "structured_acceptance_criteria_status": "unavailable",
+      "requirement_verification_proven": false,
+      "baseline_regression_comparison_status": "unavailable",
+      "user_supplied_requirements": "Apply a 10% discount to premium customers only without affecting regular checkout or refunds.",
+      "changed_files": ["sample_projects/mini_pos/billing.py"],
+      "impacted_modules": [
+        "sample_projects/mini_pos/customer_service.py",
+        "sample_projects/mini_pos/dashboard.py",
+        "sample_projects/mini_pos/refunds.py",
+        "sample_projects/mini_pos/reports.py"
+      ],
+      "proposed_scenario_ids": ["SCN-001"],
+      "human_approved_scenario_ids": ["SCN-001"],
+      "executed_scenario_ids": ["SCN-001"],
+      "observed_verification_outcome": "passed",
+      "verification_passed": true,
+      "unverified_scenario_ids": []
+    },
     "agent_communication_summary": [],
-    "evidence_limitations": [],
+    "evidence_limitations": [
+      "Baseline-versus-modified regression comparison was not executed; passing generated tests on the modified working copy alone does not guarantee complete regression safety.",
+      "Structured requirement decomposition (A1), automated patch generation (A4), independent adversarial review (A6), and code coverage measurement are not executed in this M02 MVP.",
+      "Reviewer identity labels are unauthenticated local MVP inputs and do not constitute cryptographic or SSO identity proof.",
+      "Proposed tests were produced by an offline mock/stub model ('deterministic_offline_stub', is_mock_output=True) and must not be presented as live LLM performance.",
+      "Code coverage percentage is unavailable (not measured).",
+      "AI root-cause analysis is unavailable (deterministic keyword diagnostics only)."
+    ],
     "human_approval_required": true
   },
   "final_decision": null,
