@@ -362,6 +362,81 @@ def _detect_non_application_failure(
     return None
 
 
+_TEST_ASSUMPTION_ERROR_RE = re.compile(
+    r"\b(?:TypeError|AttributeError|NameError|UnboundLocalError):[^\n]*",
+)
+
+
+def _matching_failure_evidence(
+    test_identity: str,
+    relative_path: str | None,
+    snapshot: BaselineVerificationResult | ModifiedVerificationResult | None,
+) -> list[str]:
+    """Collect matching failure diagnostic text for a single test identity."""
+    if snapshot is None:
+        return []
+    matches: list[str] = []
+    for ev in snapshot.test_evidence:
+        if ev.test_identity == test_identity and ev.failure_message:
+            matches.append(ev.failure_message)
+    file_name = PurePath(relative_path).name if relative_path else None
+    for diag in snapshot.failures:
+        if (
+            diag.test_name == test_identity
+            or (relative_path and relative_path in diag.test_name)
+            or (file_name and file_name in diag.test_name)
+        ):
+            if diag.evidence:
+                matches.append(diag.evidence)
+    return matches
+
+
+def _is_persistent_test_assumption_defect(
+    *,
+    test_identity: str,
+    relative_path: str | None,
+    baseline: BaselineVerificationResult | None,
+    modified: ModifiedVerificationResult | None,
+) -> tuple[bool, bool, str | None]:
+    """Check whether a persistent acceptance failure has sufficient attribution evidence.
+
+    Returns ``(has_diagnostic_evidence, is_unreliable_test_assumption, detail)``:
+    - If neither ``modified.failures`` nor ``modified.test_evidence`` contains
+      diagnostic evidence for the failing test, ``has_diagnostic_evidence=False``
+      (preventing unjustified retries when failure attribution is incomplete).
+    - If both baseline and modified fail with an identical non-assertion runtime
+      assumption error (``TypeError``, ``AttributeError``, ``NameError``,
+      ``UnboundLocalError``) rather than an ``AssertionError``, marks it as an
+      unreliable generated-test assumption rather than an unmet requirement.
+    """
+    mod_texts = _matching_failure_evidence(test_identity, relative_path, modified)
+    if not mod_texts:
+        return False, False, (
+            f"Persistent acceptance failure '{test_identity}' lacks structured failure "
+            "diagnostic evidence; refusing unjustified application repair."
+        )
+
+    combined_mod = "\n".join(mod_texts)
+    if "AssertionError" in combined_mod:
+        return True, False, None
+
+    base_texts = _matching_failure_evidence(test_identity, relative_path, baseline)
+    combined_base = "\n".join(base_texts)
+    mod_match = _TEST_ASSUMPTION_ERROR_RE.search(combined_mod)
+    base_match = _TEST_ASSUMPTION_ERROR_RE.search(combined_base)
+    if mod_match and base_match:
+        mod_err_type = mod_match.group(0).split(":", 1)[0]
+        base_err_type = base_match.group(0).split(":", 1)[0]
+        if mod_err_type == base_err_type:
+            return True, True, (
+                f"Persistent acceptance failure '{test_identity}' raised an identical "
+                f"{mod_err_type} on both baseline and modified snapshots without an "
+                "AssertionError, indicating an unreliable generated-test assumption "
+                "(e.g., wrong function signature or symbol name) rather than an unmet requirement."
+            )
+    return True, False, None
+
+
 class RepairEligibilityEvaluator:
     """Conservative, deterministic evaluator for bounded automated patch repair."""
 
@@ -497,6 +572,8 @@ class RepairEligibilityEvaluator:
         assert comparison is not None
         confirmed_regressions: list[str] = []
         acceptance_failures: list[str] = []
+        unreliable_test_assumptions: list[str] = []
+        unattributed_acceptance_failures: list[str] = []
         preexisting_failures: list[str] = []
         failed_cids: list[str] = []
 
@@ -513,6 +590,28 @@ class RepairEligibilityEvaluator:
                     tc.suite_kind == TestSuiteKind.GENERATED_ACCEPTANCE
                     and tc.test_purpose == TestPurpose.NEW_REQUIREMENT_ACCEPTANCE
                 ):
+                    has_diag, is_test_assumption, detail = (
+                        _is_persistent_test_assumption_defect(
+                            test_identity=tc.test_identity,
+                            relative_path=tc.relative_path,
+                            baseline=baseline,
+                            modified=modified,
+                        )
+                    )
+                    if is_test_assumption:
+                        unreliable_test_assumptions.append(
+                            detail or tc.test_identity
+                        )
+                        continue
+                    if not has_diag or not tc.criterion_ids:
+                        unattributed_acceptance_failures.append(
+                            detail
+                            or (
+                                f"Persistent acceptance failure '{tc.test_identity}' lacks "
+                                "explicit criterion mapping or failure diagnostics."
+                            )
+                        )
+                        continue
                     acceptance_failures.append(tc.test_identity)
                     for cid in tc.criterion_ids:
                         if cid not in failed_cids:
@@ -520,8 +619,21 @@ class RepairEligibilityEvaluator:
                 else:
                     preexisting_failures.append(tc.test_identity)
 
+        if unreliable_test_assumptions and not confirmed_regressions:
+            return _ineligible(
+                RepairEligibilityCategory.TEST_DEFECT_OR_SYNTAX_ERROR,
+                " ".join(unreliable_test_assumptions),
+                blocking=unreliable_test_assumptions,
+            )
+
         attributable = [*confirmed_regressions, *acceptance_failures]
         if not attributable:
+            if unattributed_acceptance_failures:
+                return _ineligible(
+                    RepairEligibilityCategory.UNATTRIBUTABLE_FAILURE,
+                    " ".join(unattributed_acceptance_failures),
+                    blocking=unattributed_acceptance_failures,
+                )
             if preexisting_failures:
                 return _ineligible(
                     RepairEligibilityCategory.PERSISTENT_PREEXISTING_FAILURE,

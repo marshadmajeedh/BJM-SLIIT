@@ -792,8 +792,17 @@ class WorkspaceManager:
         # If caller passed <workspace_root>/<workspace_id>/repo, remove the parent run folder
         rel_parts = target.relative_to(ws_root).parts
         delete_root = ws_root / rel_parts[0]
+        if delete_root.is_symlink():
+            raise WorkspaceSecurityError(
+                f"Refusing to delete symlink workspace directory: '{delete_root}'"
+            )
         if not delete_root.exists():
             return False
+        resolved_delete = delete_root.resolve(strict=True)
+        if not resolved_delete.is_relative_to(ws_root) or resolved_delete == ws_root:
+            raise WorkspaceSecurityError(
+                f"Refusing to delete resolved path outside workspace_root: '{workspace_path}'"
+            )
 
-        _safe_rmtree(delete_root)
+        _safe_rmtree(resolved_delete)
         return True

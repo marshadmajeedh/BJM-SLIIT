@@ -50,6 +50,8 @@ def test_workflow_states_match_m02_contract_with_bounded_patch_repair() -> None:
         "COMPARING_VERIFICATION_RESULTS",
         "EVALUATING_REPAIR_ELIGIBILITY",
         "REPAIRING_PATCH",
+        "RUNNING_INDEPENDENT_REVIEW",
+        "RECONCILING_REVIEW_EVIDENCE",
         "RUNNING_VERIFICATION",
         "COMPILING_REPORT",
         "AWAITING_FINAL_APPROVAL",
@@ -63,6 +65,8 @@ def test_workflow_states_match_m02_contract_with_bounded_patch_repair() -> None:
     assert actual == expected
     assert "EVALUATING_REPAIR_ELIGIBILITY" in actual
     assert "REPAIRING_PATCH" in actual
+    assert "RUNNING_INDEPENDENT_REVIEW" in actual
+    assert "RECONCILING_REVIEW_EVIDENCE" in actual
 
 
 def test_create_run_request_defaults_and_validation() -> None:

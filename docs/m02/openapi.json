@@ -1485,6 +1485,82 @@
               }
             ]
           },
+          "independent_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IndependentReviewResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review_reconciliation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceReconciliationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review_availability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewAvailabilityStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviewer_recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "material_disagreements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Material Disagreements"
+          },
+          "approval_restrictions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approval Restrictions"
+          },
+          "reviewed_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Proposal Id"
+          },
+          "reviewed_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Patch Sha256"
+          },
           "risk_summary": {
             "$ref": "#/components/schemas/RiskSummary"
           },
@@ -1828,6 +1904,17 @@
               }
             ],
             "title": "Max Repair Attempts"
+          },
+          "require_independent_review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Require Independent Review"
           }
         },
         "additionalProperties": false,
@@ -1935,6 +2022,150 @@
         ],
         "title": "ErrorResponse",
         "description": "Safe, structured API error envelope without internal stack traces."
+      },
+      "EvidenceReconciliationResponse": {
+        "properties": {
+          "reconciliation_status": {
+            "type": "string",
+            "enum": [
+              "reconciled_aligned",
+              "reconciled_with_disagreement",
+              "reconciled_reviewer_unavailable",
+              "reconciled_reviewer_invalid_or_stale",
+              "reconciled_deterministic_block"
+            ],
+            "title": "Reconciliation Status"
+          },
+          "assurance_classification": {
+            "type": "string",
+            "enum": [
+              "fully_supported_requirement_assurance",
+              "reviewer_supported_verification",
+              "incomplete_evidence_package",
+              "reviewer_disagreement",
+              "reviewer_unavailable",
+              "deterministic_verification_blocked"
+            ],
+            "title": "Assurance Classification"
+          },
+          "deterministic_verification_passed": {
+            "type": "boolean",
+            "title": "Deterministic Verification Passed"
+          },
+          "has_confirmed_regression": {
+            "type": "boolean",
+            "title": "Has Confirmed Regression",
+            "default": false
+          },
+          "has_blocking_ambiguity": {
+            "type": "boolean",
+            "title": "Has Blocking Ambiguity",
+            "default": false
+          },
+          "candidate_integrity_verified": {
+            "type": "boolean",
+            "title": "Candidate Integrity Verified",
+            "default": true
+          },
+          "review_candidate_identity_verified": {
+            "type": "boolean",
+            "title": "Review Candidate Identity Verified",
+            "default": false
+          },
+          "review_availability": {
+            "$ref": "#/components/schemas/ReviewAvailabilityStatus",
+            "default": "unavailable"
+          },
+          "reviewer_recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviewer_is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Reviewer Is Deterministic Fixture",
+            "default": false
+          },
+          "material_disagreements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Material Disagreements"
+          },
+          "unsubstantiated_claims": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unsubstantiated Claims"
+          },
+          "invalid_evidence_references": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Invalid Evidence References"
+          },
+          "approval_restrictions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approval Restrictions"
+          },
+          "blocks_ordinary_approval": {
+            "type": "boolean",
+            "title": "Blocks Ordinary Approval",
+            "default": false
+          },
+          "blocking_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocking Error Code"
+          },
+          "complete_requirement_assurance": {
+            "type": "boolean",
+            "title": "Complete Requirement Assurance",
+            "default": false
+          },
+          "evidence_package_complete": {
+            "type": "boolean",
+            "title": "Evidence Package Complete",
+            "default": false
+          },
+          "reconciled_summary": {
+            "type": "string",
+            "title": "Reconciled Summary",
+            "default": ""
+          },
+          "reconciled_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Reconciled At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reconciliation_status",
+          "assurance_classification",
+          "deterministic_verification_passed",
+          "reconciled_at"
+        ],
+        "title": "EvidenceReconciliationResponse",
+        "description": "Sanitized deterministic evidence reconciliation and approval-restriction view."
       },
       "ExecutionMode": {
         "type": "string",
@@ -2135,6 +2366,16 @@
           "patch_generator_configured": {
             "type": "boolean",
             "title": "Patch Generator Configured",
+            "default": false
+          },
+          "independent_reviewer_configured": {
+            "type": "boolean",
+            "title": "Independent Reviewer Configured",
+            "default": false
+          },
+          "require_independent_review": {
+            "type": "boolean",
+            "title": "Require Independent Review",
             "default": false
           },
           "auto_repair_enabled": {
@@ -2347,6 +2588,181 @@
         ],
         "title": "ImpactedFile",
         "description": "Normalized downstream module impacted by a changed Python file."
+      },
+      "IndependentReviewResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "unavailable",
+              "invalid",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/ReviewAvailabilityStatus"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviewed_run_id": {
+            "type": "string",
+            "title": "Reviewed Run Id"
+          },
+          "reviewed_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Proposal Id"
+          },
+          "reviewed_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Patch Sha256"
+          },
+          "reviewed_baseline_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Baseline Snapshot Sha256"
+          },
+          "reviewed_modified_snapshot_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Modified Snapshot Sha256"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewFinding"
+            },
+            "type": "array",
+            "title": "Findings"
+          },
+          "requirement_compliance_concerns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requirement Compliance Concerns"
+          },
+          "potential_behavioral_regressions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Potential Behavioral Regressions"
+          },
+          "security_and_maintainability_concerns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Security And Maintainability Concerns"
+          },
+          "missing_verification_evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Verification Evidence"
+          },
+          "unsupported_assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unsupported Assumptions"
+          },
+          "evidence_references": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewEvidenceReference"
+            },
+            "type": "array",
+            "title": "Evidence References"
+          },
+          "model_metadata": {
+            "$ref": "#/components/schemas/ReviewModelMetadata"
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture",
+            "default": false
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output",
+            "default": false
+          },
+          "reviewed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Reviewed At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "availability",
+          "reviewed_run_id",
+          "model_metadata",
+          "reviewed_at"
+        ],
+        "title": "IndependentReviewResponse",
+        "description": "Sanitized A6 independent review view without host paths or unredacted secrets."
       },
       "IndividualTestOutcome": {
         "type": "string",
@@ -4342,6 +4758,262 @@
         "title": "RequirementTraceability",
         "description": "Per-criterion traceability linking requirement -> files -> tests -> evidence."
       },
+      "ReviewAvailabilityStatus": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "completed_offline_fixture",
+          "unavailable",
+          "failed",
+          "skipped"
+        ],
+        "title": "ReviewAvailabilityStatus",
+        "description": "Explicit availability and provenance status of independent review evidence."
+      },
+      "ReviewEvidenceReference": {
+        "properties": {
+          "reference_type": {
+            "type": "string",
+            "enum": [
+              "criterion",
+              "constraint",
+              "assumption",
+              "ambiguity",
+              "file",
+              "patch_proposal",
+              "patch_sha256",
+              "snapshot_sha256",
+              "scenario",
+              "test_identity",
+              "repair_attempt",
+              "baseline_comparison",
+              "verification_outcome"
+            ],
+            "title": "Reference Type"
+          },
+          "reference_id": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Reference Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Description",
+            "default": ""
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reference_type",
+          "reference_id"
+        ],
+        "title": "ReviewEvidenceReference",
+        "description": "Typed citation linking a review finding or conclusion to a known run artifact."
+      },
+      "ReviewFinding": {
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Finding Id"
+          },
+          "category": {
+            "$ref": "#/components/schemas/ReviewFindingCategory"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/ReviewFindingSeverity"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "is_material": {
+            "type": "boolean",
+            "title": "Is Material",
+            "default": false
+          },
+          "related_criterion_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Criterion Ids"
+          },
+          "affected_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Affected Files"
+          },
+          "evidence_references": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewEvidenceReference"
+            },
+            "type": "array",
+            "title": "Evidence References"
+          },
+          "substantiated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Substantiated"
+          },
+          "reconciliation_note": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Reconciliation Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "finding_id",
+          "category",
+          "severity",
+          "title",
+          "description"
+        ],
+        "title": "ReviewFinding",
+        "description": "Single structured concern or observation raised by an A6 Independent Reviewer."
+      },
+      "ReviewFindingCategory": {
+        "type": "string",
+        "enum": [
+          "requirement_compliance",
+          "behavioral_regression",
+          "security",
+          "maintainability",
+          "missing_verification_evidence",
+          "unsupported_assumption",
+          "evidence_conflict",
+          "other"
+        ],
+        "title": "ReviewFindingCategory",
+        "description": "Structured review finding classification."
+      },
+      "ReviewFindingSeverity": {
+        "type": "string",
+        "enum": [
+          "critical",
+          "high",
+          "medium",
+          "low",
+          "info"
+        ],
+        "title": "ReviewFindingSeverity",
+        "description": "Qualitative finding severity without fabricated numerical severity scores."
+      },
+      "ReviewModelMetadata": {
+        "properties": {
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "model_label": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Model Label",
+            "default": "unconfigured"
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "offline_test",
+              "live_llm"
+            ],
+            "title": "Execution Mode",
+            "default": "offline_test"
+          },
+          "is_deterministic_fixture": {
+            "type": "boolean",
+            "title": "Is Deterministic Fixture",
+            "default": false
+          },
+          "is_mock_output": {
+            "type": "boolean",
+            "title": "Is Mock Output",
+            "default": false
+          },
+          "token_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Usage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReviewModelMetadata",
+        "description": "Non-fabricated provider and model provenance for an independent review call."
+      },
+      "ReviewRecommendation": {
+        "type": "string",
+        "enum": [
+          "support",
+          "reject",
+          "needs_review"
+        ],
+        "title": "ReviewRecommendation",
+        "description": "Supported qualitative recommendations emitted by an A6 Independent Reviewer."
+      },
       "RiskSummary": {
         "properties": {
           "severity": {
@@ -4600,6 +5272,72 @@
               }
             ]
           },
+          "require_independent_review": {
+            "type": "boolean",
+            "title": "Require Independent Review",
+            "default": false
+          },
+          "review_availability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewAvailabilityStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviewer_recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "material_disagreements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Material Disagreements"
+          },
+          "approval_restrictions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approval Restrictions"
+          },
+          "reviewed_candidate_proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Proposal Id"
+          },
+          "reviewed_candidate_patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Candidate Patch Sha256"
+          },
+          "complete_requirement_assurance": {
+            "type": "boolean",
+            "title": "Complete Requirement Assurance",
+            "default": false
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -4738,6 +5476,26 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/VerificationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "independent_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IndependentReviewResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review_reconciliation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceReconciliationResponse"
               },
               {
                 "type": "null"
@@ -4995,6 +5753,36 @@
           "has_confirmed_regression": {
             "type": "boolean",
             "title": "Has Confirmed Regression",
+            "default": false
+          },
+          "review_availability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewAvailabilityStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviewer_recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_material_review_disagreement": {
+            "type": "boolean",
+            "title": "Has Material Review Disagreement",
+            "default": false
+          },
+          "complete_requirement_assurance": {
+            "type": "boolean",
+            "title": "Complete Requirement Assurance",
             "default": false
           },
           "has_error": {
@@ -5987,6 +6775,8 @@
           "COMPARING_VERIFICATION_RESULTS",
           "EVALUATING_REPAIR_ELIGIBILITY",
           "REPAIRING_PATCH",
+          "RUNNING_INDEPENDENT_REVIEW",
+          "RECONCILING_REVIEW_EVIDENCE",
           "RUNNING_VERIFICATION",
           "COMPILING_REPORT",
           "AWAITING_FINAL_APPROVAL",
