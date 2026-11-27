@@ -3742,6 +3742,47 @@
         "title": "PatchValidationResponse",
         "description": "Safe patch validation evidence view."
       },
+      "PreChangeClassMetadata": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "end_line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Line"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "PreChangeClassMetadata",
+        "description": "Structured AST metadata for a class discovered by M01."
+      },
       "PreChangeContextResponse": {
         "properties": {
           "status": {
@@ -3876,6 +3917,34 @@
             "type": "array",
             "title": "Imports"
           },
+          "function_metadata": {
+            "items": {
+              "$ref": "#/components/schemas/PreChangeFunctionMetadata"
+            },
+            "type": "array",
+            "title": "Function Metadata"
+          },
+          "class_metadata": {
+            "items": {
+              "$ref": "#/components/schemas/PreChangeClassMetadata"
+            },
+            "type": "array",
+            "title": "Class Metadata"
+          },
+          "import_metadata": {
+            "items": {
+              "$ref": "#/components/schemas/PreChangeImportMetadata"
+            },
+            "type": "array",
+            "title": "Import Metadata"
+          },
+          "metadata_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Metadata Warnings"
+          },
           "parse_error": {
             "anyOf": [
               {
@@ -3897,6 +3966,117 @@
         ],
         "title": "PreChangeFileSummary",
         "description": "Static AST summary of a single indexed Python file before patch generation."
+      },
+      "PreChangeFunctionMetadata": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "end_line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Line"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "function",
+                  "method",
+                  "async_function"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "PreChangeFunctionMetadata",
+        "description": "Structured AST metadata for a function or method discovered by M01."
+      },
+      "PreChangeImportMetadata": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 300,
+            "title": "Name",
+            "default": ""
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "absolute",
+                  "relative"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 64.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Level"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PreChangeImportMetadata",
+        "description": "Structured AST metadata for an import discovered by M01."
       },
       "RegressionComparisonSummary": {
         "properties": {

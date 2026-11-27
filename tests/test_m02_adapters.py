@@ -135,6 +135,273 @@ def test_codebase_adapter_empty_diff_and_invalid_base_ref(tmp_path) -> None:
     assert flag_ref.error.code == "INVALID_GIT_REF"
 
 
+def test_codebase_adapter_real_m01_structured_ast_classes_functions_and_relative_imports(
+    tmp_path: Path,
+) -> None:
+    """GAP-04: Real M01 analyzer output preserves structured functions, classes, and relative imports."""
+    repo = tmp_path / "pkg_repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.invalid")
+
+    pkg = repo / "src" / "shop"
+    sub = pkg / "sub"
+    sub.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "base.py").write_text(
+        "class PriceCalculator:\n"
+        "    def compute(self, amount):\n"
+        "        return amount\n\n"
+        "    async def fetch_rate(self):\n"
+        "        return 1.0\n\n"
+        "def helper():\n"
+        "    return 42\n\n"
+        "async def async_helper():\n"
+        "    return 7\n",
+        encoding="utf-8",
+    )
+    (sub / "worker.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from . import helper_peer\n"
+        "from .helper_peer import ping\n"
+        "from ..base import PriceCalculator\n\n"
+        "class Worker:\n"
+        "    def execute(self):\n"
+        "        return (json, Path, helper_peer, ping, PriceCalculator)\n",
+        encoding="utf-8",
+    )
+    (sub / "helper_peer.py").write_text("def ping():\n    return 'pong'\n", encoding="utf-8")
+    (pkg / "secrets.py").write_text("API_KEY = 'gsk_SecretFileShouldNeverBeIndexed12345'\n", encoding="utf-8")
+    (pkg / ".env").write_text("GROQ_API_KEY=gsk_EnvFileShouldNeverBeIndexed12345\n", encoding="utf-8")
+
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline structured pkg")
+
+    adapter = CodebaseAdapter(_trusted_config(tmp_path))
+    ctx, relevant_sources = adapter.collect_pre_change_context(
+        repo, source_path="src", base_ref="HEAD"
+    )
+
+    assert ctx.status == "completed"
+    assert ctx.pre_change_impact_prediction_available is False
+    assert "src/shop/secrets.py" not in ctx.indexed_file_paths
+    assert "src/shop/secrets.py" not in relevant_sources
+    assert all(".env" not in p for p in ctx.indexed_file_paths)
+
+    by_path = {item.repo_relative_path: item for item in ctx.indexed_files}
+    assert "src/shop/base.py" in by_path
+    assert "src/shop/sub/worker.py" in by_path
+
+    base = by_path["src/shop/base.py"]
+    assert base.source_relative_path == "shop/base.py"
+    assert base.classes == ["PriceCalculator"]
+    assert len(base.class_metadata) == 1
+    assert base.class_metadata[0].name == "PriceCalculator"
+    assert base.class_metadata[0].line == 1
+    assert base.class_metadata[0].end_line is not None and base.class_metadata[0].end_line >= 6
+
+    assert base.functions == [
+        "PriceCalculator.compute",
+        "PriceCalculator.fetch_rate",
+        "helper",
+        "async_helper",
+    ]
+    fn_meta = {m.name: m for m in base.function_metadata}
+    assert fn_meta["PriceCalculator.compute"].kind == "method"
+    assert fn_meta["PriceCalculator.compute"].line == 2
+    assert fn_meta["PriceCalculator.fetch_rate"].kind == "async_function"
+    assert fn_meta["helper"].kind == "function"
+    assert fn_meta["async_helper"].kind == "async_function"
+    assert base.metadata_warnings == []
+
+    worker = by_path["src/shop/sub/worker.py"]
+    assert worker.classes == ["Worker"]
+    assert worker.functions == ["Worker.execute"]
+    assert worker.imports == [
+        "json",
+        "pathlib",
+        ".",
+        ".helper_peer",
+        "..base",
+    ]
+    assert len(worker.import_metadata) == 5
+    imp_by_line = {m.line: m for m in worker.import_metadata}
+    assert imp_by_line[1].name == "json"
+    assert imp_by_line[1].kind == "absolute"
+    assert imp_by_line[1].level == 0
+    assert imp_by_line[2].name == "pathlib"
+    assert imp_by_line[2].kind == "absolute"
+    assert imp_by_line[2].level == 0
+    assert imp_by_line[3].name == ""
+    assert imp_by_line[3].kind == "relative"
+    assert imp_by_line[3].level == 1
+    assert imp_by_line[4].name == "helper_peer"
+    assert imp_by_line[4].kind == "relative"
+    assert imp_by_line[4].level == 1
+    assert imp_by_line[5].name == "base"
+    assert imp_by_line[5].kind == "relative"
+    assert imp_by_line[5].level == 2
+    assert worker.metadata_warnings == []
+
+    # Post-change M01 analyze() resolves relative imports and emits updated accurate assumption text
+    (pkg / "base.py").write_text(
+        (pkg / "base.py").read_text(encoding="utf-8").replace("return 42", "return 99"),
+        encoding="utf-8",
+    )
+    impact = adapter.analyze(repo, source_path="src", base_ref="HEAD")
+    assert impact.status == "completed"
+    assert "src/shop/sub/worker.py" in impact.impacted_modules_repo_relative
+    assert any(
+        "absolute and relative" in note.lower() and "only" not in note.lower()
+        for note in impact.assumptions
+    )
+
+
+def test_codebase_adapter_legacy_mixed_malformed_and_secret_redacted_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-04: Legacy strings, mixed formats, malformed entries, and secret redaction."""
+    repo = tmp_path / "compat_repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.invalid")
+
+    app_dir = repo / "app"
+    app_dir.mkdir()
+    synthetic_secret = "gsk_" + "AdapterPreChangeSecret1234567890"
+    (app_dir / "legacy.py").write_text("def legacy_fn():\n    return 1\n", encoding="utf-8")
+    (app_dir / "mixed.py").write_text(
+        f"TOKEN = '{synthetic_secret}'\n\ndef ok_fn():\n    return 2\n",
+        encoding="utf-8",
+    )
+    (app_dir / "sparse.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline compat")
+
+    def _fake_analyze_repository(_path: str) -> dict[str, object]:
+        return {
+            "repository": str(app_dir),
+            "total_files": 4,
+            "errors": [],
+            "files": [
+                # Malformed top-level entry (no path) must be recorded explicitly, not crash
+                {"functions": ["orphan"]},
+                # 1. Legacy string-only schema (must NOT fabricate line/end_line/kind/level)
+                {
+                    "path": "legacy.py",
+                    "functions": ["legacy_fn", "LegacyCls.run"],
+                    "classes": ["LegacyCls"],
+                    "imports": ["os", ".local_mod"],
+                },
+                # 2. Mixed + malformed + secret-bearing entries
+                {
+                    "path": "mixed.py",
+                    "functions": [
+                        {"name": "ok_fn", "line": 3, "end_line": 4, "kind": "function"},
+                        "legacy_str_fn",
+                        {"name": "bad_bounds", "line": 10, "end_line": 2, "kind": "unknown_kind"},
+                        {"name": ""},
+                        {"line": 5},
+                        123,
+                        "   ",
+                    ],
+                    "classes": [
+                        {"name": "GoodClass", "line": 1, "end_line": 5},
+                        "LegacyClass",
+                        {"name": None},
+                        None,
+                    ],
+                    "imports": [
+                        {"name": "billing", "line": 1, "kind": "absolute", "level": 0},
+                        {"name": "", "line": 2, "kind": "relative", "level": 1},
+                        {"name": "helpers", "line": 3, "kind": "relative", "level": 2},
+                        "legacy_import",
+                        {"name": "conflict_abs", "line": 4, "kind": "absolute", "level": 2},
+                        {"name": "conflict_rel", "line": 5, "kind": "relative", "level": 0},
+                        {"name": "", "line": 6, "kind": "absolute", "level": 0},
+                        {"name": 999},
+                        False,
+                    ],
+                    "error": f"SyntaxError near api_key={synthetic_secret}",
+                },
+                # 3. Missing keys / non-list container
+                {
+                    "path": "sparse.py",
+                    "functions": None,
+                    "classes": "NotAList",
+                    # 'imports' key omitted intentionally
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "project.marsadh_orchestrator.adapters.codebase_adapter.analyze_repository",
+        _fake_analyze_repository,
+    )
+
+    adapter = CodebaseAdapter(_trusted_config(tmp_path))
+    ctx, relevant_sources = adapter.collect_pre_change_context(
+        repo, source_path="app", base_ref="HEAD"
+    )
+
+    assert ctx.status == "completed"
+    assert ctx.total_indexed_files == 3
+    by_path = {item.repo_relative_path: item for item in ctx.indexed_files}
+
+    # Legacy string compatibility without fabricating metadata
+    legacy = by_path["app/legacy.py"]
+    assert legacy.functions == ["legacy_fn", "LegacyCls.run"]
+    assert all(m.line is None and m.end_line is None and m.kind is None for m in legacy.function_metadata)
+    assert legacy.classes == ["LegacyCls"]
+    assert legacy.class_metadata[0].line is None and legacy.class_metadata[0].end_line is None
+    assert legacy.imports == ["os", ".local_mod"]
+    assert all(m.line is None and m.kind is None and m.level is None for m in legacy.import_metadata)
+    assert legacy.metadata_warnings == []
+
+    # Mixed + malformed handling preserves valid entries and warns explicitly
+    mixed = by_path["app/mixed.py"]
+    assert mixed.functions == ["ok_fn", "legacy_str_fn", "bad_bounds"]
+    fn_meta = {m.name: m for m in mixed.function_metadata}
+    assert (fn_meta["ok_fn"].line, fn_meta["ok_fn"].end_line, fn_meta["ok_fn"].kind) == (3, 4, "function")
+    assert (fn_meta["legacy_str_fn"].line, fn_meta["legacy_str_fn"].kind) == (None, None)
+    assert (fn_meta["bad_bounds"].line, fn_meta["bad_bounds"].end_line, fn_meta["bad_bounds"].kind) == (10, None, None)
+
+    assert mixed.classes == ["GoodClass", "LegacyClass"]
+    assert mixed.imports == ["billing", ".", "..helpers", "legacy_import", "conflict_abs", "conflict_rel"]
+    imp_meta = mixed.import_metadata
+    assert (imp_meta[0].name, imp_meta[0].kind, imp_meta[0].level) == ("billing", "absolute", 0)
+    assert (imp_meta[1].name, imp_meta[1].kind, imp_meta[1].level) == ("", "relative", 1)
+    assert (imp_meta[2].name, imp_meta[2].kind, imp_meta[2].level) == ("helpers", "relative", 2)
+    assert (imp_meta[3].name, imp_meta[3].kind, imp_meta[3].level) == ("legacy_import", None, None)
+    assert (imp_meta[4].name, imp_meta[4].kind, imp_meta[4].level) == ("conflict_abs", None, None)
+    assert (imp_meta[5].name, imp_meta[5].kind, imp_meta[5].level) == ("conflict_rel", None, None)
+
+    assert len(mixed.metadata_warnings) >= 8
+    assert mixed.parse_error is not None
+    assert synthetic_secret not in mixed.parse_error
+    assert "[REDACTED" in mixed.parse_error
+
+    # Secret redaction in bounded source context forwarded to A4
+    assert synthetic_secret not in relevant_sources["app/mixed.py"]
+    assert "[REDACTED" in relevant_sources["app/mixed.py"]
+
+    # Missing keys / non-list container handled cleanly
+    sparse = by_path["app/sparse.py"]
+    assert sparse.functions == []
+    assert sparse.classes == []
+    assert sparse.imports == []
+    assert len(sparse.metadata_warnings) == 2
+
+    # Limitation notes explicitly record skipped malformed file entry and metadata warnings
+    assert any("Skipped 1 malformed M01 file metadata" in note for note in ctx.limitation_notes)
+    assert any("malformed AST metadata warning" in note for note in ctx.limitation_notes)
+
+
 # ---------------------------------------------------------------------------
 # TestingAdapter (M03) tests
 # ---------------------------------------------------------------------------

@@ -27,7 +27,13 @@ from project.schemas.agents import (
     SuiteExecutionSummary,
     TestExecutionEvidence,
 )
-from project.schemas.patch import PatchApplicationResult, PatchGenerationResult, PatchValidationResult
+from project.schemas.patch import (
+    PatchApplicationResult,
+    PatchGenerationResult,
+    PatchValidationResult,
+    PreChangeCodebaseContext,
+    PreChangeFileSummary,
+)
 from project.schemas.repair import (
     PatchAttemptRecord,
     RepairAttemptHistory,
@@ -485,6 +491,56 @@ def _sanitize_verification_result(ver: Any) -> Any:
     )
 
 
+def _sanitize_pre_change_file_summary(
+    summary: PreChangeFileSummary,
+) -> PreChangeFileSummary:
+    return summary.model_copy(
+        update={
+            "functions": [redact_secrets(fn) for fn in summary.functions],
+            "classes": [redact_secrets(cl) for cl in summary.classes],
+            "imports": [redact_secrets(im) for im in summary.imports],
+            "function_metadata": [
+                meta.model_copy(update={"name": redact_secrets(meta.name)})
+                for meta in summary.function_metadata
+            ],
+            "class_metadata": [
+                meta.model_copy(update={"name": redact_secrets(meta.name)})
+                for meta in summary.class_metadata
+            ],
+            "import_metadata": [
+                meta.model_copy(update={"name": redact_secrets(meta.name)})
+                for meta in summary.import_metadata
+            ],
+            "metadata_warnings": [
+                redact_secrets(warn) for warn in summary.metadata_warnings
+            ],
+            "parse_error": (
+                redact_secrets(summary.parse_error)
+                if summary.parse_error is not None
+                else None
+            ),
+        }
+    )
+
+
+def _sanitize_pre_change_context(
+    ctx: PreChangeCodebaseContext | None,
+) -> PreChangeCodebaseContext | None:
+    if ctx is None:
+        return None
+    return ctx.model_copy(
+        update={
+            "indexed_files": [
+                _sanitize_pre_change_file_summary(item) for item in ctx.indexed_files
+            ],
+            "limitation_notes": [
+                redact_secrets(note) for note in ctx.limitation_notes
+            ],
+            "error": _sanitize_error(ctx.error),
+        }
+    )
+
+
 def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
     """Redact secret patterns across top-level and nested run errors/summaries."""
     updates: dict[str, object] = {"error": _sanitize_error(run.error)}
@@ -512,14 +568,8 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
         )
 
     if run.pre_change_context is not None:
-        updates["pre_change_context"] = run.pre_change_context.model_copy(
-            update={
-                "limitation_notes": [
-                    redact_secrets(note)
-                    for note in run.pre_change_context.limitation_notes
-                ],
-                "error": _sanitize_error(run.pre_change_context.error),
-            }
+        updates["pre_change_context"] = _sanitize_pre_change_context(
+            run.pre_change_context
         )
 
     if run.patch_generation_request is not None:
@@ -537,6 +587,9 @@ def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
         updates["patch_generation_request"] = req_obj.model_copy(
             update={
                 "original_requirement": redact_secrets(req_obj.original_requirement),
+                "codebase_context": _sanitize_pre_change_context(
+                    req_obj.codebase_context
+                ),
                 # Never persist raw source file contents into SQLite; retain file path list only.
                 "relevant_source_files": {},
                 "previous_proposed_patch": (

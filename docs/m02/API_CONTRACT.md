@@ -278,7 +278,7 @@ Returns `RunDetailResponse`. Internal host absolute paths (`workspace_path`, abs
     "file_impacts": [],
     "error": null,
     "assumptions": [
-      "M01 static reverse-dependency analysis resolves absolute Python imports only; dynamic or relative imports may not appear."
+      "M01 static reverse-dependency analysis resolves static absolute and relative Python imports via AST; dynamic imports or runtime sys.path dependencies may not appear."
     ]
   },
   "test_generation": {

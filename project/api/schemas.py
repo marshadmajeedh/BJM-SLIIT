@@ -23,6 +23,7 @@ from project.marsadh_orchestrator.store import (
     _sanitize_baseline_verification,
     _sanitize_independent_review,
     _sanitize_modified_verification,
+    _sanitize_pre_change_context,
     _sanitize_repair_eligibility,
     _sanitize_review_reconciliation,
     redact_nested_secrets,
@@ -677,21 +678,22 @@ def _allowed_actions(run: WorkflowRunRecord) -> list[str]:
 def _to_pre_change_context_response(
     ctx: PreChangeCodebaseContext | None,
 ) -> PreChangeContextResponse | None:
-    if ctx is None:
+    sanitized = _sanitize_pre_change_context(ctx)
+    if sanitized is None:
         return None
     return PreChangeContextResponse(
-        status=ctx.status,
-        scope=ctx.scope,
-        pre_change_impact_prediction_available=ctx.pre_change_impact_prediction_available,
-        source_path=ctx.source_path,
-        base_ref=ctx.base_ref,
-        resolved_base_commit=ctx.resolved_base_commit,
-        total_indexed_files=ctx.total_indexed_files,
-        indexed_file_paths=list(ctx.indexed_file_paths),
-        indexed_files=list(ctx.indexed_files),
-        relevant_file_paths=list(ctx.relevant_file_paths),
-        limitation_notes=[redact_secrets(note) for note in ctx.limitation_notes],
-        error=_sanitize_error(ctx.error),
+        status=sanitized.status,
+        scope=sanitized.scope,
+        pre_change_impact_prediction_available=sanitized.pre_change_impact_prediction_available,
+        source_path=sanitized.source_path,
+        base_ref=sanitized.base_ref,
+        resolved_base_commit=sanitized.resolved_base_commit,
+        total_indexed_files=sanitized.total_indexed_files,
+        indexed_file_paths=list(sanitized.indexed_file_paths),
+        indexed_files=list(sanitized.indexed_files),
+        relevant_file_paths=list(sanitized.relevant_file_paths),
+        limitation_notes=list(sanitized.limitation_notes),
+        error=_sanitize_error(sanitized.error),
     )
 
 
