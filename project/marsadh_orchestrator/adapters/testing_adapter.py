@@ -38,6 +38,15 @@ from project.schemas.agents import (
 from project.schemas.workflow import ExecutionMode
 
 _GROQ_ENV_LOCK = threading.Lock()
+_RETRYABLE_PROVIDER_ERROR_NAMES = frozenset(
+    {
+        "APITimeoutError",
+        "APIConnectionError",
+        "RateLimitError",
+        "InternalServerError",
+        "TimeoutError",
+    }
+)
 
 _SCENARIO_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
@@ -109,9 +118,16 @@ class TestingAdapter:
             else os.environ.get("GROQ_MODEL", "").strip()
         )
         if not api_key or not groq_model:
+            missing: list[str] = []
+            if not api_key:
+                missing.append("GROQ_API_KEY")
+            if not groq_model:
+                missing.append("GROQ_MODEL")
+            missing_label = " and ".join(missing)
             raise RuntimeError(
-                "Live LLM execution requested, but GROQ_API_KEY and GROQ_MODEL are not "
-                "configured. Refusing to fall back to mock output."
+                f"Live LLM execution requested, but {missing_label} "
+                f"{'are' if len(missing) > 1 else 'is'} not configured. "
+                "Refusing to fall back to mock output."
             )
 
         # Lazy import so importing TestingAdapter never initializes external AI SDKs.
@@ -263,7 +279,7 @@ class TestingAdapter:
                 model_label=resolved_label,
                 error=AgentError(
                     code="INVALID_MODEL_JSON",
-                    message=f"Model returned invalid JSON: {exc}",
+                    message=redact_secrets(f"Model returned invalid JSON: {exc}"),
                     retryable=True,
                 ),
             )
@@ -276,10 +292,11 @@ class TestingAdapter:
                 model_label=resolved_label,
                 error=AgentError(
                     code="INVALID_MODEL_OUTPUT",
-                    message=str(exc),
+                    message=redact_secrets(str(exc)),
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            exc_name = type(exc).__name__
             return TestGenerationResult(
                 status="error",
                 executed=False,
@@ -289,6 +306,8 @@ class TestingAdapter:
                 error=AgentError(
                     code="M03_GENERATION_ERROR",
                     message=redact_secrets(f"M03 test generation failed: {exc}"),
+                    details={"provider_error_type": exc_name},
+                    retryable=exc_name in _RETRYABLE_PROVIDER_ERROR_NAMES,
                 ),
             )
 

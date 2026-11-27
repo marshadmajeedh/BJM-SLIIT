@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from project.schemas.agents import AgentError
 from project.schemas.workflow import AgentLogEntry, WorkflowRunRecord, WorkflowState
@@ -35,6 +36,10 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
             re.DOTALL,
         ),
         "[REDACTED_PRIVATE_KEY]",
+    ),
+    (
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{10,}"),
+        "Bearer [REDACTED]",
     ),
     (
         re.compile(
@@ -71,17 +76,27 @@ def redact_secrets(text: str) -> str:
     return sanitized
 
 
+def redact_nested_secrets(value: Any) -> Any:
+    """Recursively redact secrets across nested dicts, lists, tuples, and strings."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: redact_nested_secrets(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_nested_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_nested_secrets(item) for item in value]
+    return value
+
+
 def _sanitize_error(error: AgentError | None) -> AgentError | None:
     if error is None:
         return None
-    sanitized_details = {
-        key: redact_secrets(val) if isinstance(val, str) else val
-        for key, val in error.details.items()
-    }
+    sanitized_details = redact_nested_secrets(error.details)
     return error.model_copy(
         update={
             "message": redact_secrets(error.message),
-            "details": sanitized_details,
+            "details": sanitized_details if isinstance(sanitized_details, dict) else {},
         }
     )
 
