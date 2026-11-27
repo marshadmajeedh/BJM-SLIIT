@@ -86,6 +86,51 @@ def _sanitize_error(error: AgentError | None) -> AgentError | None:
     )
 
 
+def _sanitize_run_record(run: WorkflowRunRecord) -> WorkflowRunRecord:
+    """Redact secret patterns across top-level and nested run errors/summaries."""
+    updates: dict[str, object] = {"error": _sanitize_error(run.error)}
+
+    if run.agent_records:
+        updates["agent_records"] = [
+            rec.model_copy(
+                update={
+                    "output_summary": redact_secrets(rec.output_summary),
+                    "error": _sanitize_error(rec.error),
+                }
+            )
+            for rec in run.agent_records
+        ]
+
+    if run.codebase_analysis is not None and run.codebase_analysis.error is not None:
+        updates["codebase_analysis"] = run.codebase_analysis.model_copy(
+            update={"error": _sanitize_error(run.codebase_analysis.error)}
+        )
+
+    if run.test_generation is not None and run.test_generation.error is not None:
+        updates["test_generation"] = run.test_generation.model_copy(
+            update={"error": _sanitize_error(run.test_generation.error)}
+        )
+
+    if run.verification is not None:
+        sanitized_failures = [
+            fail.model_copy(update={"evidence": redact_secrets(fail.evidence)})
+            for fail in run.verification.failures
+        ]
+        updates["verification"] = run.verification.model_copy(
+            update={
+                "error": _sanitize_error(run.verification.error),
+                "collection_errors": [
+                    redact_secrets(err) for err in run.verification.collection_errors
+                ],
+                "failures": sanitized_failures,
+                "stdout_excerpt": redact_secrets(run.verification.stdout_excerpt),
+                "stderr_excerpt": redact_secrets(run.verification.stderr_excerpt),
+            }
+        )
+
+    return run.model_copy(update=updates)
+
+
 class RunStore:
     """Lightweight SQLite store for workflow run state and structured agent logs."""
 
@@ -160,12 +205,7 @@ class RunStore:
     def save_run(self, run: WorkflowRunRecord) -> WorkflowRunRecord:
         """Persist a new or updated WorkflowRunRecord by its unique run_id."""
         now = utc_now()
-        record = run.model_copy(
-            update={
-                "updated_at": now,
-                "error": _sanitize_error(run.error),
-            }
-        )
+        record = _sanitize_run_record(run).model_copy(update={"updated_at": now})
         payload = record.model_dump_json()
         with self._connect(write=True) as conn:
             conn.execute(
@@ -312,11 +352,8 @@ class RunStore:
                     )
 
             updated = updater(current)
-            sanitized = updated.model_copy(
-                update={
-                    "updated_at": utc_now(),
-                    "error": _sanitize_error(updated.error),
-                }
+            sanitized = _sanitize_run_record(updated).model_copy(
+                update={"updated_at": utc_now()}
             )
             conn.execute(
                 """
